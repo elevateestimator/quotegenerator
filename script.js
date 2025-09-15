@@ -1,18 +1,19 @@
 /* ===========================================================
    Endura Roofing — Quote
-   script.js  (Manual PDF export + smart page breaks)
-   - Off-screen sandbox (not clipped)
-   - Waits for fonts & images before capture
-   - Uses html2canvas + jsPDF (no html2pdf auto-paging)
+   script.js  (Manual PDF export + smart page breaks + auto libs)
+   - Auto-loads html2canvas & jsPDF if missing
+   - Off-screen sandbox (not clipped), waits for fonts & images
+   - Clone sized to 816x1056 px (Letter @ 96dpi)
    - Smart cuts between cards/sections to avoid mid-card splits
    - Discount toggle respected; removed from PDF when off/zero
    - Summary values aligned; Tax Rate aligned in PDF
    =========================================================== */
 
-/* ===== Helpers ===== */
+/* ===== Shortcuts ===== */
 const $  = (sel, ctx = document) => ctx.querySelector(sel);
 const $$ = (sel, ctx = document) => Array.from(ctx.querySelectorAll(sel));
 
+/* ===== Money helpers ===== */
 const formatMoney = (n) =>
   (Number.isFinite(n) ? n : 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const moneyWithSymbol = (n) =>
@@ -24,10 +25,10 @@ const parseNum = (str) => {
   return isNaN(n) ? 0 : n;
 };
 
-/* ===== Constants (Letter @ 96dpi) ===== */
+/* ===== Letter dimensions (CSS px @ 96dpi) ===== */
 const PX_PER_IN = 96;
-const PAGE_W_CSS = 8.5 * PX_PER_IN;   // 816 px
-const PAGE_H_CSS = 11  * PX_PER_IN;   // 1056 px
+const PAGE_W_CSS = Math.round(8.5 * PX_PER_IN);  // 816
+const PAGE_H_CSS = Math.round(11  * PX_PER_IN);  // 1056
 
 /* ===== Discount toggle state ===== */
 const LS_KEY_DISCOUNT = 'discountEnabled';
@@ -36,11 +37,7 @@ const getSavedDiscountEnabled = () => {
   return saved === null ? true : saved === 'true';
 };
 let discountEnabled = getSavedDiscountEnabled();
-
-function toggleDiscountRow(on) {
-  const row = document.getElementById('discount-row');
-  if (row) row.style.display = on ? '' : 'none';
-}
+function toggleDiscountRow(on) { const row = document.getElementById('discount-row'); if (row) row.style.display = on ? '' : 'none'; }
 
 /* ===== Defaults ===== */
 function setDefaults() {
@@ -53,11 +50,10 @@ function setDefaults() {
   const expEl  = $('[data-bind="quote_expires"]');
   if (dateEl && !dateEl.value) dateEl.value = toISO(today);
   if (expEl && !expEl.value)   expEl.value  = toISO(expires);
-
   if ($('#tax-rate') && !$('#tax-rate').value) $('#tax-rate').value = '13';
 }
 
-/* ===== Line Items ===== */
+/* ===== Items ===== */
 function makeRow(data = {}) {
   const tr = document.createElement('tr');
   tr.className = 'item-row avoid-break';
@@ -97,7 +93,7 @@ function recalcAll() {
 
   $('#subtotal').textContent = formatMoney(subtotal);
 
-  // Discount (ignored if toggle is OFF)
+  // Discount (ignore if toggle OFF)
   const discountActive = !!discountEnabled;
   const discountType = discountActive ? ($('#discount-type')?.value ?? 'amount') : 'amount';
   const discountVal  = discountActive ? parseNum($('#discount-value')?.value ?? 0) : 0;
@@ -105,17 +101,15 @@ function recalcAll() {
   const discounted   = Math.max(0, subtotal - discount);
 
   // Tax
-  const taxRatePct   = parseNum($('#tax-rate').value);
-  const taxRate      = taxRatePct / 100;
+  const taxRatePct = parseNum($('#tax-rate').value);
+  const taxRate    = taxRatePct / 100;
   const taxBaseAfterDiscount =
     taxableBase > 0 ? (taxableBase - (discount * (taxableBase / Math.max(1, subtotal)))) : 0;
   const tax = Math.max(0, taxBaseAfterDiscount * taxRate);
   $('#tax-amount').textContent = formatMoney(tax);
 
-  // Fees
+  // Fees & grand
   const fees  = parseNum($('#fees').value);
-
-  // Grand Total
   const grand = Math.max(0, discounted + tax + fees);
   $('#grand-total').textContent = formatMoney(grand);
 
@@ -132,7 +126,25 @@ function updateDeposit(grandTotal) {
   }
 }
 
-/* ===== Assets wait (fonts & images) ===== */
+/* ===== Dynamically load libs if needed ===== */
+function loadScript(src) {
+  return new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = src; s.defer = true; s.onload = res; s.onerror = () => rej(new Error('Failed to load ' + src));
+    document.head.appendChild(s);
+  });
+}
+async function ensurePdfLibs() {
+  // If html2canvas/jsPDF already on window, we're good.
+  if (!window.html2canvas) {
+    await loadScript('https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js');
+  }
+  if (!window.jspdf || !window.jspdf.jsPDF) {
+    await loadScript('https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js');
+  }
+}
+
+/* ===== Wait for fonts & images ===== */
 async function waitForAssets(root, timeoutMs = 8000) {
   const waitFonts = (document.fonts && document.fonts.ready) ? document.fonts.ready : Promise.resolve();
   const imgs = Array.from(root.querySelectorAll('img'));
@@ -145,16 +157,12 @@ async function waitForAssets(root, timeoutMs = 8000) {
   await Promise.race([Promise.all([waitFonts, Promise.all(imgPromises)]), timeout]);
 }
 
-/* ===== Build a clean PDF clone =====
-   - Removes Discount if toggle OFF or computed 0
-   - Aligns Tax Rate with $ column
-   - Drops the last "delete" column from Items
-*/
+/* ===== Build clean clone for PDF ===== */
 function buildPrintClone() {
   const original = document.getElementById('page');
   const clone = original.cloneNode(true);
 
-  // Lock dimensions in CSS px to avoid inch/px rounding surprises
+  // Pin dimensions in px to avoid inch/px rounding
   clone.style.width = PAGE_W_CSS + 'px';
   clone.style.minHeight = PAGE_H_CSS + 'px';
   clone.style.margin = '0';
@@ -163,7 +171,7 @@ function buildPrintClone() {
   clone.style.boxShadow = 'none';
   clone.style.border = '0';
 
-  // Strong "no-break" rules (some engines ignore display:contents)
+  // Strong "no break inside" for major blocks
   const style = document.createElement('style');
   style.textContent = `
     .card, .grid-2, .signatures, .doc-header, .table-wrap, .items-table tr, .totals-grid, .avoid-break {
@@ -174,7 +182,7 @@ function buildPrintClone() {
   `;
   clone.prepend(style);
 
-  // Discount toggle/value logic
+  // Discount (toggle OFF or computed 0 => remove row)
   const enabled = document.getElementById('discount-toggle')
     ? document.getElementById('discount-toggle').checked
     : true;
@@ -198,7 +206,7 @@ function buildPrintClone() {
     }
   }
 
-  // Replace editable controls with text for crisp output
+  // Replace inputs/selects/areas with text for crisp output
   const replaceControl = (el, text) => {
     const isArea = el.tagName === 'TEXTAREA';
     const out = document.createElement(isArea ? 'div' : 'span');
@@ -230,7 +238,7 @@ function buildPrintClone() {
     rateCell.innerHTML = `<span class="curr curr-placeholder">$</span><span class="amt">${srcRate}%</span>`;
   }
 
-  // Remove screen-only bits and the last "X" column from Items
+  // Remove screen-only bits and the last "X" column
   clone.querySelectorAll('.no-print').forEach(el => el.remove());
   const itemsTable = clone.querySelector('#items-table');
   if (itemsTable) {
@@ -258,20 +266,19 @@ function createPdfSandbox() {
   return sandbox;
 }
 
-/* ===== Find smart page cuts (between cards/sections) ===== */
+/* ===== Compute smart page cuts (between sections) ===== */
 function computeCutPositionsPx(clone, scaleFactor, idealPageHeightPxCanvas) {
-  // Candidate boundaries: bottom of each major block
   const selectors = [
     '.doc-header', '.grid-2', '.card', '.signatures',
     '.table-wrap', '.items-table', '.totals', '.avoid-break'
   ];
   const rect = clone.getBoundingClientRect();
-  const bottomsCss = new Set([0]); // start at top
+  const bottomsCss = new Set([0]); // include top of page
 
   selectors.forEach(sel => {
     clone.querySelectorAll(sel).forEach(el => {
       const r = el.getBoundingClientRect();
-      const bottomCss = (r.bottom - rect.top); // CSS px relative to clone top
+      const bottomCss = (r.bottom - rect.top);
       if (bottomCss > 0) bottomsCss.add(Math.round(bottomCss));
     });
   });
@@ -282,7 +289,7 @@ function computeCutPositionsPx(clone, scaleFactor, idealPageHeightPxCanvas) {
 
   const cuts = [];
   let y = 0;
-  const minStep = Math.round(200 * scaleFactor); // don't get stuck on tiny steps
+  const minStep = Math.round(200 * scaleFactor); // avoid tiny slices
   while (y + 1 < bottomsCanvas[bottomsCanvas.length - 1]) {
     const target = y + idealPageHeightPxCanvas;
     // choose the largest boundary <= target but > y + minStep
@@ -298,8 +305,15 @@ function computeCutPositionsPx(clone, scaleFactor, idealPageHeightPxCanvas) {
 }
 
 /* ===== Export ===== */
+let exporting = false;
 async function downloadPDF() {
+  if (exporting) return;
+  exporting = true;
+
   try {
+    // Make sure libs are present (works on Vercel or any host)
+    await ensurePdfLibs();
+
     recalcAll();
 
     const clone = buildPrintClone();
@@ -312,8 +326,8 @@ async function downloadPDF() {
     // Wait for fonts & images inside the clone
     await waitForAssets(clone);
 
-    // Render to canvas
-    const scale = 2; // crisp
+    // Render to canvas at scale=2 for crispness
+    const scale = 2;
     const canvas = await window.html2canvas(clone, {
       scale,
       useCORS: true,
@@ -333,22 +347,22 @@ async function downloadPDF() {
     const pdfW = pdf.internal.pageSize.getWidth();   // 612 pt
     const pdfH = pdf.internal.pageSize.getHeight();  // 792 pt
 
-    // Height of one PDF page in canvas pixels when scaled to fit width
+    // Height of one PDF page in canvas px when scaled to fit width
     const pageHeightPxCanvas = Math.floor(canvasW * (pdfH / pdfW));
 
     // Compute smart cut positions (in canvas px)
     const cuts = computeCutPositionsPx(clone, scaleFactor, pageHeightPxCanvas);
 
-    // Helper to draw a slice
+    // Slice & add pages
     const pageCanvas = document.createElement('canvas');
     pageCanvas.width = canvasW;
+    const ctx = pageCanvas.getContext('2d');
 
     let prev = 0;
     for (let i = 0; i < cuts.length; i++) {
       const next = cuts[i];
       const sliceH = next - prev;
       pageCanvas.height = sliceH;
-      const ctx = pageCanvas.getContext('2d');
       ctx.clearRect(0, 0, pageCanvas.width, pageCanvas.height);
       ctx.drawImage(canvas, 0, prev, canvasW, sliceH, 0, 0, canvasW, sliceH);
 
@@ -359,11 +373,10 @@ async function downloadPDF() {
       prev = next;
     }
 
-    // If content below last cut remains, add it
+    // Remaining tail
     if (prev < canvasH) {
       const sliceH = canvasH - prev;
       pageCanvas.height = sliceH;
-      const ctx = pageCanvas.getContext('2d');
       ctx.clearRect(0, 0, pageCanvas.width, pageCanvas.height);
       ctx.drawImage(canvas, 0, prev, canvasW, sliceH, 0, 0, canvasW, sliceH);
 
@@ -373,18 +386,18 @@ async function downloadPDF() {
       pdf.addImage(imgData, 'JPEG', 0, 0, pdfW, imgHpt);
     }
 
-    pdf.save(getPdfFilename());
+    const client = $('[data-bind="client_name"]').value?.trim() || 'Client';
+    const qno    = $('[data-bind="quote_no"]').value?.trim() || 'Quote';
+    const filename = `${client.replace(/[^\w\-]+/g,'_')}_${qno.replace(/[^\w\-]+/g,'_')}.pdf`;
+    pdf.save(filename);
+
     sandbox.remove();
   } catch (e) {
     console.error('PDF export error', e);
     alert('PDF export failed. Please refresh and try again.');
+  } finally {
+    exporting = false;
   }
-}
-
-function getPdfFilename() {
-  const client = $('[data-bind="client_name"]').value?.trim() || 'Client';
-  const qno    = $('[data-bind="quote_no"]').value?.trim() || 'Quote';
-  return `${client.replace(/[^\w\-]+/g,'_')}_${qno.replace(/[^\w\-]+/g,'_')}.pdf`;
 }
 
 /* ===== Preview / Clear / Wire-up ===== */
@@ -398,7 +411,6 @@ function togglePreview() {
     else el.removeAttribute('disabled');
   });
 }
-
 function clearForm() {
   if (!confirm('Clear all fields and line items?')) return;
   $$('input[type="text"], input[type="date"], textarea').forEach(el => {
@@ -410,38 +422,27 @@ function clearForm() {
   $('#item-rows').innerHTML = ''; ensureAtLeastOneRow(); recalcAll();
 }
 
+/* ===== Boot ===== */
 document.addEventListener('DOMContentLoaded', () => {
   setDefaults();
 
-  // Auto-insert the Discount toggle beside Clear if not present
+  // Discount toggle beside Clear (auto-create if missing)
   let discountToggle = document.getElementById('discount-toggle');
   if (!discountToggle) {
     const left = document.querySelector('.toolbar .left');
     if (left) {
       const label = document.createElement('label');
-      label.className = 'switch no-print';
-      label.title = 'Show/Hide Discount';
-
-      const input = document.createElement('input');
-      input.type = 'checkbox';
-      input.id = 'discount-toggle';
-      input.checked = discountEnabled;
-
-      const span = document.createElement('span');
-      span.textContent = 'Discount';
-
-      label.appendChild(input);
-      label.appendChild(span);
-
+      label.className = 'switch no-print'; label.title = 'Show/Hide Discount';
+      const input = document.createElement('input'); input.type = 'checkbox'; input.id = 'discount-toggle'; input.checked = discountEnabled;
+      const span = document.createElement('span'); span.textContent = 'Discount';
+      label.appendChild(input); label.appendChild(span);
       const clearBtn = document.getElementById('btn-clear');
-      if (clearBtn) clearBtn.insertAdjacentElement('afterend', label);
-      else left.appendChild(label);
+      if (clearBtn) clearBtn.insertAdjacentElement('afterend', label); else left.appendChild(label);
       discountToggle = input;
     }
   } else {
     discountToggle.checked = discountEnabled;
   }
-
   toggleDiscountRow(discountEnabled);
   if (discountToggle) {
     discountToggle.addEventListener('change', (e) => {
@@ -457,7 +458,7 @@ document.addEventListener('DOMContentLoaded', () => {
   body.appendChild(makeRow({ qty: 1, price: 0, taxable: true }));
   body.appendChild(makeRow({ qty: 1, price: 0, taxable: false }));
 
-  // Inputs affecting totals
+  // Recalc on inputs
   ['#discount-type', '#discount-value', '#tax-rate', '#fees'].forEach(sel => {
     $(sel).addEventListener('input', recalcAll);
     $(sel).addEventListener('change', recalcAll);
@@ -469,12 +470,11 @@ document.addEventListener('DOMContentLoaded', () => {
     updateDeposit(grand);
   }));
 
-  // Toolbar
+  // Toolbar — both buttons export the same clean PDF
   $('#btn-add-line').addEventListener('click', () => {
     $('#item-rows').appendChild(makeRow({ qty: 1, price: 0, taxable: true }));
     recalcAll();
   });
-  // Both buttons export the same clean PDF (no browser headers/footers)
   $('#btn-download').addEventListener('click', downloadPDF);
   $('#btn-print').addEventListener('click', downloadPDF);
   $('#btn-preview').addEventListener('click', togglePreview);
