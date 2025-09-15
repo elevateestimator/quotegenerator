@@ -1,18 +1,17 @@
 /* ===========================================================
    Endura Roofing — Quote
-   script.js  (PDF-only export + sandbox + px Letter sizing)
-   - Off-screen sandbox (no clipping/left-shift)
+   script.js  (Manual PDF export + smart page breaks)
+   - Off-screen sandbox (not clipped)
    - Waits for fonts & images before capture
-   - Clone sized to 816x1056 px (Letter @ 96dpi)
-   - Discount toggle respected; discount row removed when off/zero
-   - Drops "no-print" column from Items in PDF
+   - Uses html2canvas + jsPDF (no html2pdf auto-paging)
+   - Smart cuts between cards/sections to avoid mid-card splits
+   - Discount toggle respected; removed from PDF when off/zero
    - Summary values aligned; Tax Rate aligned in PDF
    =========================================================== */
 
 /* ===== Helpers ===== */
 const $  = (sel, ctx = document) => ctx.querySelector(sel);
 const $$ = (sel, ctx = document) => Array.from(ctx.querySelectorAll(sel));
-const PX_PER_IN = 96, PAGE_W = 8.5 * PX_PER_IN, PAGE_H = 11 * PX_PER_IN;
 
 const formatMoney = (n) =>
   (Number.isFinite(n) ? n : 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -25,6 +24,11 @@ const parseNum = (str) => {
   return isNaN(n) ? 0 : n;
 };
 
+/* ===== Constants (Letter @ 96dpi) ===== */
+const PX_PER_IN = 96;
+const PAGE_W_CSS = 8.5 * PX_PER_IN;   // 816 px
+const PAGE_H_CSS = 11  * PX_PER_IN;   // 1056 px
+
 /* ===== Discount toggle state ===== */
 const LS_KEY_DISCOUNT = 'discountEnabled';
 const getSavedDiscountEnabled = () => {
@@ -32,6 +36,7 @@ const getSavedDiscountEnabled = () => {
   return saved === null ? true : saved === 'true';
 };
 let discountEnabled = getSavedDiscountEnabled();
+
 function toggleDiscountRow(on) {
   const row = document.getElementById('discount-row');
   if (row) row.style.display = on ? '' : 'none';
@@ -43,10 +48,12 @@ function setDefaults() {
   const pad = (n) => String(n).padStart(2, '0');
   const toISO = (d) => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
   const expires = new Date(today); expires.setDate(today.getDate() + 30);
+
   const dateEl = $('[data-bind="quote_date"]');
   const expEl  = $('[data-bind="quote_expires"]');
   if (dateEl && !dateEl.value) dateEl.value = toISO(today);
   if (expEl && !expEl.value)   expEl.value  = toISO(expires);
+
   if ($('#tax-rate') && !$('#tax-rate').value) $('#tax-rate').value = '13';
 }
 
@@ -90,7 +97,7 @@ function recalcAll() {
 
   $('#subtotal').textContent = formatMoney(subtotal);
 
-  // Discount (ignored when toggle OFF)
+  // Discount (ignored if toggle is OFF)
   const discountActive = !!discountEnabled;
   const discountType = discountActive ? ($('#discount-type')?.value ?? 'amount') : 'amount';
   const discountVal  = discountActive ? parseNum($('#discount-value')?.value ?? 0) : 0;
@@ -138,33 +145,36 @@ async function waitForAssets(root, timeoutMs = 8000) {
   await Promise.race([Promise.all([waitFonts, Promise.all(imgPromises)]), timeout]);
 }
 
-/* ===== PDF clone ===== */
+/* ===== Build a clean PDF clone =====
+   - Removes Discount if toggle OFF or computed 0
+   - Aligns Tax Rate with $ column
+   - Drops the last "delete" column from Items
+*/
 function buildPrintClone() {
   const original = document.getElementById('page');
   const clone = original.cloneNode(true);
 
-  // Pin dimensions in PX to avoid inch/px rounding issues
-  clone.style.width = PAGE_W + 'px';
-  clone.style.minHeight = PAGE_H + 'px';
+  // Lock dimensions in CSS px to avoid inch/px rounding surprises
+  clone.style.width = PAGE_W_CSS + 'px';
+  clone.style.minHeight = PAGE_H_CSS + 'px';
   clone.style.margin = '0';
-  clone.style.padding = getComputedStyle(original).padding; // keep your page padding
+  clone.style.padding = getComputedStyle(original).padding;
   clone.style.background = '#ffffff';
   clone.style.boxShadow = 'none';
   clone.style.border = '0';
 
-  // Inject small PDF-only CSS into the clone for reliable layout & no breaks
+  // Strong "no-break" rules (some engines ignore display:contents)
   const style = document.createElement('style');
   style.textContent = `
     .card, .grid-2, .signatures, .doc-header, .table-wrap, .items-table tr, .totals-grid, .avoid-break {
       break-inside: avoid; page-break-inside: avoid;
       -webkit-column-break-inside: avoid; -webkit-region-break-inside: avoid;
     }
-    /* Ensure totals-grid rows use the same 3-column layout inside the clone */
     .totals-grid { grid-template-columns: auto 1fr var(--valw,16ch) !important; }
   `;
   clone.prepend(style);
 
-  // Handle Discount row (toggle OFF or value 0 => remove)
+  // Discount toggle/value logic
   const enabled = document.getElementById('discount-toggle')
     ? document.getElementById('discount-toggle').checked
     : true;
@@ -188,7 +198,7 @@ function buildPrintClone() {
     }
   }
 
-  // Replace inputs/selects/areas with text for crisp output
+  // Replace editable controls with text for crisp output
   const replaceControl = (el, text) => {
     const isArea = el.tagName === 'TEXTAREA';
     const out = document.createElement(isArea ? 'div' : 'span');
@@ -213,21 +223,19 @@ function buildPrintClone() {
     }
   });
 
-  // Align Tax Rate cell with the $ column
+  // Align Tax Rate like currency rows
   const rateCell = clone.querySelector('#taxrate-row .value');
   if (rateCell) {
     const srcRate = (document.getElementById('tax-rate')?.value ?? '13').replace(/[^\d.]/g, '') || '13';
     rateCell.innerHTML = `<span class="curr curr-placeholder">$</span><span class="amt">${srcRate}%</span>`;
   }
 
-  // Remove screen-only bits (and the last "X" column robustly)
+  // Remove screen-only bits and the last "X" column from Items
   clone.querySelectorAll('.no-print').forEach(el => el.remove());
   const itemsTable = clone.querySelector('#items-table');
   if (itemsTable) {
-    // Drop last col from colgroup
     const cg = itemsTable.querySelector('colgroup');
     if (cg && cg.lastElementChild) cg.removeChild(cg.lastElementChild);
-    // Remove last TH/TD if still present
     itemsTable.querySelectorAll('thead tr th:last-child, tbody tr td:last-child').forEach(el => el.remove());
   }
 
@@ -244,10 +252,49 @@ function createPdfSandbox() {
   sandbox.style.opacity = '0';
   sandbox.style.pointerEvents = 'none';
   sandbox.style.background = '#ffffff';
-  sandbox.style.width = PAGE_W + 'px';
-  sandbox.style.minHeight = PAGE_H + 'px';
+  sandbox.style.width = PAGE_W_CSS + 'px';
+  sandbox.style.minHeight = PAGE_H_CSS + 'px';
   document.body.appendChild(sandbox);
   return sandbox;
+}
+
+/* ===== Find smart page cuts (between cards/sections) ===== */
+function computeCutPositionsPx(clone, scaleFactor, idealPageHeightPxCanvas) {
+  // Candidate boundaries: bottom of each major block
+  const selectors = [
+    '.doc-header', '.grid-2', '.card', '.signatures',
+    '.table-wrap', '.items-table', '.totals', '.avoid-break'
+  ];
+  const rect = clone.getBoundingClientRect();
+  const bottomsCss = new Set([0]); // start at top
+
+  selectors.forEach(sel => {
+    clone.querySelectorAll(sel).forEach(el => {
+      const r = el.getBoundingClientRect();
+      const bottomCss = (r.bottom - rect.top); // CSS px relative to clone top
+      if (bottomCss > 0) bottomsCss.add(Math.round(bottomCss));
+    });
+  });
+
+  const bottomsCanvas = Array.from(bottomsCss)
+    .map(css => Math.round(css * scaleFactor))
+    .sort((a,b) => a - b);
+
+  const cuts = [];
+  let y = 0;
+  const minStep = Math.round(200 * scaleFactor); // don't get stuck on tiny steps
+  while (y + 1 < bottomsCanvas[bottomsCanvas.length - 1]) {
+    const target = y + idealPageHeightPxCanvas;
+    // choose the largest boundary <= target but > y + minStep
+    let candidate = y + idealPageHeightPxCanvas;
+    for (let i = bottomsCanvas.length - 1; i >= 0; i--) {
+      const b = bottomsCanvas[i];
+      if (b <= target && b > y + minStep) { candidate = b; break; }
+    }
+    cuts.push(candidate);
+    y = candidate;
+  }
+  return cuts;
 }
 
 /* ===== Export ===== */
@@ -265,34 +312,79 @@ async function downloadPDF() {
     // Wait for fonts & images inside the clone
     await waitForAssets(clone);
 
-    const client = $('[data-bind="client_name"]').value?.trim() || 'Client';
-    const qno    = $('[data-bind="quote_no"]').value?.trim() || 'Quote';
-    const filename = `${client.replace(/[^\w\-]+/g,'_')}_${qno.replace(/[^\w\-]+/g,'_')}.pdf`;
+    // Render to canvas
+    const scale = 2; // crisp
+    const canvas = await window.html2canvas(clone, {
+      scale,
+      useCORS: true,
+      allowTaint: true,
+      backgroundColor: '#ffffff',
+      scrollX: 0,
+      scrollY: 0
+    });
 
-    const opt = {
-      margin: [0, 0, 0, 0],
-      filename,
-      image: { type: 'jpeg', quality: 0.98 },
-      html2canvas: {
-        scale: 2,
-        useCORS: true,
-        allowTaint: true,
-        backgroundColor: '#ffffff',
-        scrollX: 0,
-        scrollY: 0,
-        windowWidth: PAGE_W,
-        windowHeight: Math.max(PAGE_H, clone.scrollHeight)
-      },
-      jsPDF: { unit: 'pt', format: 'letter', orientation: 'portrait' },
-      pagebreak: { mode: ['css', 'legacy'], avoid: ['.avoid-break', '.card', '.grid-2', '.signatures', '.items-table tr', '.totals-grid'] }
-    };
+    const canvasW = canvas.width;
+    const canvasH = canvas.height;
+    const scaleFactor = canvasW / clone.offsetWidth; // canvas px per CSS px
 
-    await html2pdf().set(opt).from(clone).save();
+    // jsPDF setup
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF({ unit: 'pt', format: 'letter', orientation: 'portrait' });
+    const pdfW = pdf.internal.pageSize.getWidth();   // 612 pt
+    const pdfH = pdf.internal.pageSize.getHeight();  // 792 pt
+
+    // Height of one PDF page in canvas pixels when scaled to fit width
+    const pageHeightPxCanvas = Math.floor(canvasW * (pdfH / pdfW));
+
+    // Compute smart cut positions (in canvas px)
+    const cuts = computeCutPositionsPx(clone, scaleFactor, pageHeightPxCanvas);
+
+    // Helper to draw a slice
+    const pageCanvas = document.createElement('canvas');
+    pageCanvas.width = canvasW;
+
+    let prev = 0;
+    for (let i = 0; i < cuts.length; i++) {
+      const next = cuts[i];
+      const sliceH = next - prev;
+      pageCanvas.height = sliceH;
+      const ctx = pageCanvas.getContext('2d');
+      ctx.clearRect(0, 0, pageCanvas.width, pageCanvas.height);
+      ctx.drawImage(canvas, 0, prev, canvasW, sliceH, 0, 0, canvasW, sliceH);
+
+      const imgData = pageCanvas.toDataURL('image/jpeg', 0.98);
+      const imgHpt = (sliceH / canvasW) * pdfW;
+      if (i > 0) pdf.addPage();
+      pdf.addImage(imgData, 'JPEG', 0, 0, pdfW, imgHpt);
+      prev = next;
+    }
+
+    // If content below last cut remains, add it
+    if (prev < canvasH) {
+      const sliceH = canvasH - prev;
+      pageCanvas.height = sliceH;
+      const ctx = pageCanvas.getContext('2d');
+      ctx.clearRect(0, 0, pageCanvas.width, pageCanvas.height);
+      ctx.drawImage(canvas, 0, prev, canvasW, sliceH, 0, 0, canvasW, sliceH);
+
+      const imgData = pageCanvas.toDataURL('image/jpeg', 0.98);
+      const imgHpt = (sliceH / canvasW) * pdfW;
+      if (cuts.length > 0) pdf.addPage();
+      pdf.addImage(imgData, 'JPEG', 0, 0, pdfW, imgHpt);
+    }
+
+    pdf.save(getPdfFilename());
     sandbox.remove();
   } catch (e) {
     console.error('PDF export error', e);
     alert('PDF export failed. Please refresh and try again.');
   }
+}
+
+function getPdfFilename() {
+  const client = $('[data-bind="client_name"]').value?.trim() || 'Client';
+  const qno    = $('[data-bind="quote_no"]').value?.trim() || 'Quote';
+  return `${client.replace(/[^\w\-]+/g,'_')}_${qno.replace(/[^\w\-]+/g,'_')}.pdf`;
 }
 
 /* ===== Preview / Clear / Wire-up ===== */
@@ -306,6 +398,7 @@ function togglePreview() {
     else el.removeAttribute('disabled');
   });
 }
+
 function clearForm() {
   if (!confirm('Clear all fields and line items?')) return;
   $$('input[type="text"], input[type="date"], textarea').forEach(el => {
@@ -326,17 +419,29 @@ document.addEventListener('DOMContentLoaded', () => {
     const left = document.querySelector('.toolbar .left');
     if (left) {
       const label = document.createElement('label');
-      label.className = 'switch no-print'; label.title = 'Show/Hide Discount';
-      const input = document.createElement('input'); input.type = 'checkbox'; input.id = 'discount-toggle'; input.checked = discountEnabled;
-      const span = document.createElement('span'); span.textContent = 'Discount';
-      label.appendChild(input); label.appendChild(span);
+      label.className = 'switch no-print';
+      label.title = 'Show/Hide Discount';
+
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.id = 'discount-toggle';
+      input.checked = discountEnabled;
+
+      const span = document.createElement('span');
+      span.textContent = 'Discount';
+
+      label.appendChild(input);
+      label.appendChild(span);
+
       const clearBtn = document.getElementById('btn-clear');
-      if (clearBtn) clearBtn.insertAdjacentElement('afterend', label); else left.appendChild(label);
+      if (clearBtn) clearBtn.insertAdjacentElement('afterend', label);
+      else left.appendChild(label);
       discountToggle = input;
     }
   } else {
     discountToggle.checked = discountEnabled;
   }
+
   toggleDiscountRow(discountEnabled);
   if (discountToggle) {
     discountToggle.addEventListener('change', (e) => {
@@ -369,6 +474,7 @@ document.addEventListener('DOMContentLoaded', () => {
     $('#item-rows').appendChild(makeRow({ qty: 1, price: 0, taxable: true }));
     recalcAll();
   });
+  // Both buttons export the same clean PDF (no browser headers/footers)
   $('#btn-download').addEventListener('click', downloadPDF);
   $('#btn-print').addEventListener('click', downloadPDF);
   $('#btn-preview').addEventListener('click', togglePreview);
