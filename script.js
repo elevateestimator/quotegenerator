@@ -7,6 +7,7 @@
    - Smart cuts between cards/sections to avoid mid-card splits
    - Discount toggle respected; removed from PDF when off/zero
    - Summary values aligned; Tax Rate aligned in PDF
+   - NEW: Pages/slices explicitly painted WHITE (fixes black area)
    =========================================================== */
 
 /* ===== Shortcuts ===== */
@@ -135,7 +136,6 @@ function loadScript(src) {
   });
 }
 async function ensurePdfLibs() {
-  // If html2canvas/jsPDF already on window, we're good.
   if (!window.html2canvas) {
     await loadScript('https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js');
   }
@@ -167,17 +167,17 @@ function buildPrintClone() {
   const original = document.getElementById('page');
   const clone = original.cloneNode(true);
 
-  // --- Pin dimensions in CSS px for stable capture (Letter @ 96dpi) ---
+  // Pin dimensions in CSS px (Letter @ 96dpi)
   const PX_PER_IN = 96, PAGE_W = 8.5 * PX_PER_IN, PAGE_H = 11 * PX_PER_IN;
   clone.style.width = PAGE_W + 'px';
   clone.style.minHeight = PAGE_H + 'px';
   clone.style.margin = '0';
-  clone.style.padding = getComputedStyle(original).padding;  // keep page padding
+  clone.style.padding = getComputedStyle(original).padding;
   clone.style.background = '#ffffff';
   clone.style.boxShadow = 'none';
   clone.style.border = '0';
 
-  // --- PDF-only styles injected into the clone ---
+  // PDF-only styles
   const style = document.createElement('style');
   style.textContent = `
     /* no-break for key blocks */
@@ -185,31 +185,29 @@ function buildPrintClone() {
       break-inside: avoid; page-break-inside: avoid;
       -webkit-column-break-inside: avoid; -webkit-region-break-inside: avoid;
     }
-    /* Summary rows use consistent 3-col layout in the PDF */
+    /* NEW: ensure white backgrounds in PDF clone */
+    .card, .signatures { background: #ffffff !important; }  /* ← keeps last page white */
+
+    /* Summary rows: consistent 3-col layout in the PDF */
     .totals-grid { grid-template-columns: auto 1fr var(--valw,16ch) !important; }
 
-    /* --- Letterhead (PDF) --- */
+    /* Letterhead (PDF) */
     .pdf-letterhead { display:grid; grid-template-columns: 160px 1fr; align-items:center; gap:14px; }
     .pdf-letterhead .pdf-logo { width: 160px; height:auto; object-fit: contain; }
     .pdf-letterhead .pdf-company { font: 800 18px/1.2 Inter, ui-sans-serif, system-ui; color: var(--brand, #0267b5); letter-spacing: .2px; }
     .pdf-letterhead .pdf-contact { display:flex; flex-wrap:wrap; gap: 6px 10px; margin-top: 6px; font: 12px/1.5 Inter, ui-sans-serif, system-ui; color:#374151; }
     .pdf-letterhead .pdf-contact > span { white-space: nowrap; }
     .pdf-letterhead .pdf-contact > span:not(:first-child)::before { content:"•"; margin: 0 8px; color:#9ca3af; }
-
-    /* thin blue accent under the letterhead */
     .pdf-letterhead + .pdf-accent { height:3px; background: linear-gradient(90deg, #0267b5, rgba(2,103,181,.35)); border-radius: 2px; margin: 8px 0 6px; }
 
-    /* Quote meta: small label + bold value */
     .meta-grid { grid-template-columns: repeat(4, 1fr) !important; gap: 10px !important; }
     .meta-grid label { display:grid; gap:4px; font-size:10px; letter-spacing:.04em; text-transform:uppercase; color:#6b7280; }
     .meta-grid label > span { font-size:12px; font-weight:700; color:#111827; }
-
-    /* keep header from ever breaking */
     .doc-header { break-inside: avoid; page-break-inside: avoid; }
   `;
   clone.prepend(style);
 
-  // --------- Build a tidy letterhead for the PDF (uses live values) ---------
+  // Build a tidy letterhead for the PDF (uses live values)
   const getVal = (k) => (document.querySelector(`[data-bind="${k}"]`)?.value || '').trim();
   const name   = getVal('company_name') || 'Endura Roofing';
   const addr1  = getVal('company_addr1');
@@ -225,17 +223,14 @@ function buildPrintClone() {
   if (email) contactParts.push(email);
   if (web)   contactParts.push(web.replace(/^https?:\/\//i, ''));
 
-  // Find the existing brand row and rebuild it for PDF
   const header = clone.querySelector('.doc-header');
   const oldBrandRow = clone.querySelector('.brand-row');
   if (header && oldBrandRow) {
     const logoFromClone = oldBrandRow.querySelector('img.logo') || document.createElement('img');
-    // New letterhead container
     const lh = document.createElement('div');
     lh.className = 'pdf-letterhead avoid-break';
 
     const left = document.createElement('div');
-    // Move the cloned logo into the new container and style it
     logoFromClone.classList.add('pdf-logo');
     left.appendChild(logoFromClone);
 
@@ -253,20 +248,17 @@ function buildPrintClone() {
     lh.appendChild(left);
     lh.appendChild(right);
 
-    // Replace old brand row with the new letterhead
     header.replaceChild(lh, oldBrandRow);
 
-    // Blue accent rule under the header
     const accent = document.createElement('div');
     accent.className = 'pdf-accent';
     header.insertBefore(accent, header.querySelector('.meta-grid'));
   }
 
-  // --------- Discount toggle/value logic (unchanged) ---------
+  // Discount toggle/value logic
   const enabled = document.getElementById('discount-toggle')
     ? document.getElementById('discount-toggle').checked
-    : true; // default if toggle missing
-
+    : true;
   if (!enabled) {
     clone.querySelector('#discount-row')?.remove();
   } else {
@@ -275,7 +267,6 @@ function buildPrintClone() {
     const raw = (document.getElementById('discount-value')?.value || '').replace(/[,$\s]/g, '');
     const dnum = parseFloat(raw) || 0;
     const computed = type === 'percent' ? subtotal * (dnum / 100) : dnum;
-
     if (Math.abs(computed) < 0.0001) {
       clone.querySelector('#discount-row')?.remove();
     } else {
@@ -287,16 +278,13 @@ function buildPrintClone() {
     }
   }
 
-  /* --------- PDF: Deposit section should only show the amount --------- */
+  /* PDF: Deposit section should only show the amount */
   {
-    // Find the Deposit card in the clone
     const depositCard = clone.querySelector('#deposit-due')?.closest('.card');
     if (depositCard) {
-      // 1) Remove the Auto/Custom radio options (and common wrappers)
       depositCard.querySelectorAll('.inline-controls, .radio-group, input[type="radio"], label.radio')
         .forEach(el => el.remove());
 
-      // 2) Replace the "Deposit Due" input with a bold, formatted amount
       const originalVal = document.getElementById('deposit-due')?.value || '';
       const numeric     = parseNum(originalVal);
       const displayVal  = (numeric > 0)
@@ -313,7 +301,7 @@ function buildPrintClone() {
     }
   }
 
-  // --------- Replace inputs/selects/areas with text for crisp output ---------
+  // Replace inputs/selects/areas with text for crisp output
   const replaceControl = (el, text) => {
     const isArea = el.tagName === 'TEXTAREA';
     const out = document.createElement(isArea ? 'div' : 'span');
@@ -345,7 +333,7 @@ function buildPrintClone() {
     rateCell.innerHTML = `<span class="curr curr-placeholder">$</span><span class="amt">${srcRate}%</span>`;
   }
 
-  // Remove screen-only bits and the last "X" column in Items for the PDF
+  // Remove screen-only bits and the last "X" column
   clone.querySelectorAll('.no-print').forEach(el => el.remove());
   const itemsTable = clone.querySelector('#items-table');
   if (itemsTable) {
@@ -399,7 +387,6 @@ function computeCutPositionsPx(clone, scaleFactor, idealPageHeightPxCanvas) {
   const minStep = Math.round(200 * scaleFactor); // avoid tiny slices
   while (y + 1 < bottomsCanvas[bottomsCanvas.length - 1]) {
     const target = y + idealPageHeightPxCanvas;
-    // choose the largest boundary <= target but > y + minStep
     let candidate = y + idealPageHeightPxCanvas;
     for (let i = bottomsCanvas.length - 1; i >= 0; i--) {
       const b = bottomsCanvas[i];
@@ -418,22 +405,20 @@ async function downloadPDF() {
   exporting = true;
 
   try {
-    // Make sure libs are present (works on Vercel or any host)
     await ensurePdfLibs();
-
     recalcAll();
 
     const clone = buildPrintClone();
 
-    // Render clone in off-screen sandbox (not clipped)
+    // Off-screen sandbox (not clipped)
     const sandbox = createPdfSandbox();
     sandbox.innerHTML = '';
     sandbox.appendChild(clone);
 
-    // Wait for fonts & images inside the clone
+    // Wait for fonts & images
     await waitForAssets(clone);
 
-    // Render to canvas at scale=2 for crispness
+    // Render to a single big canvas
     const scale = 2;
     const canvas = await window.html2canvas(clone, {
       scale,
@@ -446,36 +431,44 @@ async function downloadPDF() {
 
     const canvasW = canvas.width;
     const canvasH = canvas.height;
-    const scaleFactor = canvasW / clone.offsetWidth; // canvas px per CSS px
+    const scaleFactor = canvasW / clone.offsetWidth;
 
-    // jsPDF setup
+    // jsPDF
     const { jsPDF } = window.jspdf;
     const pdf = new jsPDF({ unit: 'pt', format: 'letter', orientation: 'portrait' });
     const pdfW = pdf.internal.pageSize.getWidth();   // 612 pt
     const pdfH = pdf.internal.pageSize.getHeight();  // 792 pt
 
-    // Height of one PDF page in canvas px when scaled to fit width
+    // Height of one PDF page in canvas px when fitted to width
     const pageHeightPxCanvas = Math.floor(canvasW * (pdfH / pdfW));
 
-    // Compute smart cut positions (in canvas px)
+    // Smart cut positions (between sections)
     const cuts = computeCutPositionsPx(clone, scaleFactor, pageHeightPxCanvas);
 
-    // Slice & add pages
+    // Reusable canvas for each page slice
     const pageCanvas = document.createElement('canvas');
     pageCanvas.width = canvasW;
-    const ctx = pageCanvas.getContext('2d');
+    const ctx = pageCanvas.getContext('2d', { alpha: false });
+    const paintWhite = (w, h) => { ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, w, h); };
 
     let prev = 0;
     for (let i = 0; i < cuts.length; i++) {
       const next = cuts[i];
       const sliceH = next - prev;
       pageCanvas.height = sliceH;
-      ctx.clearRect(0, 0, pageCanvas.width, pageCanvas.height);
+
+      // NEW: fill the slice with WHITE first, then draw the content
+      paintWhite(pageCanvas.width, pageCanvas.height);
       ctx.drawImage(canvas, 0, prev, canvasW, sliceH, 0, 0, canvasW, sliceH);
 
       const imgData = pageCanvas.toDataURL('image/jpeg', 0.98);
       const imgHpt = (sliceH / canvasW) * pdfW;
       if (i > 0) pdf.addPage();
+
+      // NEW: fill the PDF page with WHITE too (belt & suspenders)
+      pdf.setFillColor(255, 255, 255);
+      pdf.rect(0, 0, pdfW, pdfH, 'F');
+
       pdf.addImage(imgData, 'JPEG', 0, 0, pdfW, imgHpt);
       prev = next;
     }
@@ -484,12 +477,16 @@ async function downloadPDF() {
     if (prev < canvasH) {
       const sliceH = canvasH - prev;
       pageCanvas.height = sliceH;
-      ctx.clearRect(0, 0, pageCanvas.width, pageCanvas.height);
+      paintWhite(pageCanvas.width, pageCanvas.height);
       ctx.drawImage(canvas, 0, prev, canvasW, sliceH, 0, 0, canvasW, sliceH);
 
       const imgData = pageCanvas.toDataURL('image/jpeg', 0.98);
       const imgHpt = (sliceH / canvasW) * pdfW;
       if (cuts.length > 0) pdf.addPage();
+
+      pdf.setFillColor(255, 255, 255);
+      pdf.rect(0, 0, pdfW, pdfH, 'F');
+
       pdf.addImage(imgData, 'JPEG', 0, 0, pdfW, imgHpt);
     }
 
