@@ -3,6 +3,7 @@
    script.js  (PDF-only export + Discount toggle + alignment)
    - Download/Print both generate the same PDF (no browser headers/footers)
    - Waits for fonts & images before capture
+   - Uses an off-screen sandbox (not clipped) to avoid left-shift/cropping
    - Locks clone to Letter size; normalizes Summary rows for reliability
    - Discount toggle (auto-inserted if missing), removed from PDF when off or zero
    =========================================================== */
@@ -160,6 +161,7 @@ function buildPrintClone() {
   clone.style.minHeight = '11in';
   clone.style.margin = '0';
   clone.style.padding = getComputedStyle(original).padding; // keep your page padding
+  clone.style.background = '#ffffff';
 
   // Handle Discount row (toggle OFF or value 0 => remove)
   const enabled = document.getElementById('discount-toggle')
@@ -225,51 +227,73 @@ function buildPrintClone() {
     row.style.alignItems = 'center';
   });
 
-  // Remove screen-only bits
-  clone.querySelectorAll('.no-print').forEach(el => el.remove());
-
   return clone;
 }
 
+/* ===== Off-screen sandbox (prevents clipping/cropping) ===== */
+function createPdfSandbox() {
+  const sandbox = document.createElement('div');
+  sandbox.id = 'pdf-sandbox';
+  sandbox.style.position = 'fixed';
+  sandbox.style.left = '0';
+  sandbox.style.top = '0';
+  sandbox.style.zIndex = '-1';           // behind everything
+  sandbox.style.opacity = '0';           // invisible but still lays out
+  sandbox.style.pointerEvents = 'none';
+  sandbox.style.background = '#ffffff';
+  sandbox.style.width = '8.5in';
+  sandbox.style.minHeight = '11in';
+  document.body.appendChild(sandbox);
+  return sandbox;
+}
+
+/* ===== Export ===== */
 async function downloadPDF() {
-  // Recalc to ensure latest numbers
-  recalcAll();
-
-  const clone = buildPrintClone();
-
-  // Insert into hidden root so html2canvas computes layout from DOM
-  const root = document.getElementById('print-clone-root');
-  root.innerHTML = '';
-  root.appendChild(clone);
-
-  // Wait for fonts & images to be ready inside the clone
-  await waitForAssets(clone);
-
-  const client = $('[data-bind="client_name"]').value?.trim() || 'Client';
-  const qno    = $('[data-bind="quote_no"]').value?.trim() || 'Quote';
-  const filename = `${client.replace(/[^\w\-]+/g,'_')}_${qno.replace(/[^\w\-]+/g,'_')}.pdf`;
-
-  const opt = {
-    margin: [0, 0, 0, 0],
-    filename,
-    image: { type: 'jpeg', quality: 0.98 },
-    html2canvas: {
-      scale: 2,
-      useCORS: true,
-      allowTaint: true,
-      backgroundColor: '#ffffff',
-      // Capture at the clone's full width to prevent reflow
-      windowWidth: clone.scrollWidth
-    },
-    jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' },
-    // Rely on CSS + legacy; avoid-all can sometimes cause odd first-page offsets
-    pagebreak: { mode: ['css', 'legacy'], avoid: ['.avoid-break', '.card', '.grid-2', '.signatures', '.items-table tr', '.totals-grid'] }
-  };
-
   try {
+    // Recalc to ensure latest numbers
+    recalcAll();
+
+    const clone = buildPrintClone();
+
+    // Render clone in an off-screen sandbox (NOT clipped)
+    const sandbox = createPdfSandbox();
+    sandbox.innerHTML = ''; // just in case
+    sandbox.appendChild(clone);
+
+    // Wait for fonts & images to be ready inside the clone
+    await waitForAssets(clone);
+
+    const client = $('[data-bind="client_name"]').value?.trim() || 'Client';
+    const qno    = $('[data-bind="quote_no"]').value?.trim() || 'Quote';
+    const filename = `${client.replace(/[^\w\-]+/g,'_')}_${qno.replace(/[^\w\-]+/g,'_')}.pdf`;
+
+    const opt = {
+      margin: [0, 0, 0, 0],
+      filename,
+      image: { type: 'jpeg', quality: 0.98 },
+      html2canvas: {
+        scale: 2,
+        useCORS: true,
+        allowTaint: true,
+        backgroundColor: '#ffffff',
+        scrollX: 0,
+        scrollY: 0,
+        // Use the rendered size in the sandbox to avoid left-shift
+        windowWidth: clone.getBoundingClientRect().width,
+        windowHeight: clone.getBoundingClientRect().height
+      },
+      jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' },
+      // Rely on CSS + legacy; avoid-all sometimes causes odd first-page offsets
+      pagebreak: { mode: ['css', 'legacy'], avoid: ['.avoid-break', '.card', '.grid-2', '.signatures', '.items-table tr', '.totals-grid'] }
+    };
+
     await html2pdf().set(opt).from(clone).save();
-  } finally {
-    root.innerHTML = '';
+
+    // Cleanup
+    sandbox.remove();
+  } catch (e) {
+    console.error('PDF export error', e);
+    alert('PDF export failed. Please refresh and try again.');
   }
 }
 
