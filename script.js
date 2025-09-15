@@ -7,7 +7,7 @@
    - Smart cuts between cards/sections to avoid mid-card splits
    - Discount toggle respected; removed from PDF when off/zero
    - Summary values aligned; Tax Rate aligned in PDF
-   - NEW: Pages/slices explicitly painted WHITE (fixes black area)
+   - Pages/slices explicitly painted WHITE (fixes black area)
    =========================================================== */
 
 /* ===== Shortcuts ===== */
@@ -185,8 +185,8 @@ function buildPrintClone() {
       break-inside: avoid; page-break-inside: avoid;
       -webkit-column-break-inside: avoid; -webkit-region-break-inside: avoid;
     }
-    /* NEW: ensure white backgrounds in PDF clone */
-    .card, .signatures { background: #ffffff !important; }  /* ← keeps last page white */
+    /* ensure white backgrounds in PDF clone */
+    .card, .signatures { background: #ffffff !important; }
 
     /* Summary rows: consistent 3-col layout in the PDF */
     .totals-grid { grid-template-columns: auto 1fr var(--valw,16ch) !important; }
@@ -284,13 +284,11 @@ function buildPrintClone() {
     if (depositCard) {
       depositCard.querySelectorAll('.inline-controls, .radio-group, input[type="radio"], label.radio')
         .forEach(el => el.remove());
-
       const originalVal = document.getElementById('deposit-due')?.value || '';
       const numeric     = parseNum(originalVal);
       const displayVal  = (numeric > 0)
         ? '$' + numeric.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
         : (originalVal.trim() || '$0.00');
-
       const dueInputClone = depositCard.querySelector('#deposit-due');
       if (dueInputClone) {
         const out = document.createElement('span');
@@ -299,6 +297,41 @@ function buildPrintClone() {
         dueInputClone.parentNode.replaceChild(out, dueInputClone);
       }
     }
+  }
+
+  // -------- Remove screen-only bits, then fix Items table columns for PDF --------
+  // Remove all general .no-print elements (toolbars, delete column cells, etc.)
+  clone.querySelectorAll('.no-print').forEach(el => el.remove());
+
+  // Now specifically normalize the Items table so "Line Total" remains
+  const itemsTable = clone.querySelector('#items-table');
+  if (itemsTable) {
+    // If any header/body cells with .no-print remain, remove them explicitly
+    itemsTable.querySelectorAll('thead th.no-print, tbody td.no-print').forEach(el => el.remove());
+
+    // Fix colgroup to match the remaining visible header cells
+    const cg = itemsTable.querySelector('colgroup');
+    if (cg) {
+      const thCount = itemsTable.tHead ? itemsTable.tHead.rows[0].children.length : 0;
+      while (cg.children.length > thCount && cg.lastElementChild) cg.removeChild(cg.lastElementChild);
+    }
+
+    // Ensure table fills width & doesn't clip the last column
+    itemsTable.style.tableLayout = 'fixed';
+    itemsTable.style.width = '100%';
+    const wrap = itemsTable.closest('.table-wrap');
+    if (wrap) {
+      wrap.style.overflow = 'visible';
+      wrap.style.width = '100%';
+    }
+
+    // Make the Line Total values unbreakable & right-aligned (nice looking)
+    itemsTable.querySelectorAll('td.line-total span').forEach(s => {
+      s.style.display = 'inline-block';
+      s.style.minWidth = '6ch';
+      s.style.textAlign = 'right';
+      s.style.whiteSpace = 'nowrap';
+    });
   }
 
   // Replace inputs/selects/areas with text for crisp output
@@ -331,15 +364,6 @@ function buildPrintClone() {
   if (rateCell) {
     const srcRate = (document.getElementById('tax-rate')?.value ?? '13').replace(/[^\d.]/g, '') || '13';
     rateCell.innerHTML = `<span class="curr curr-placeholder">$</span><span class="amt">${srcRate}%</span>`;
-  }
-
-  // Remove screen-only bits and the last "X" column
-  clone.querySelectorAll('.no-print').forEach(el => el.remove());
-  const itemsTable = clone.querySelector('#items-table');
-  if (itemsTable) {
-    const cg = itemsTable.querySelector('colgroup');
-    if (cg && cg.lastElementChild) cg.removeChild(cg.lastElementChild);
-    itemsTable.querySelectorAll('thead tr th:last-child, tbody tr td:last-child').forEach(el => el.remove());
   }
 
   return clone;
@@ -456,8 +480,6 @@ async function downloadPDF() {
       const next = cuts[i];
       const sliceH = next - prev;
       pageCanvas.height = sliceH;
-
-      // NEW: fill the slice with WHITE first, then draw the content
       paintWhite(pageCanvas.width, pageCanvas.height);
       ctx.drawImage(canvas, 0, prev, canvasW, sliceH, 0, 0, canvasW, sliceH);
 
@@ -465,7 +487,6 @@ async function downloadPDF() {
       const imgHpt = (sliceH / canvasW) * pdfW;
       if (i > 0) pdf.addPage();
 
-      // NEW: fill the PDF page with WHITE too (belt & suspenders)
       pdf.setFillColor(255, 255, 255);
       pdf.rect(0, 0, pdfW, pdfH, 'F');
 
