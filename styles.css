@@ -219,3 +219,24 @@ body {
 .switch input:checked { background: var(--brand); border-color: var(--brand); }
 .switch input:checked::before { transform: translateX(18px); }
 .switch span { font-size: 13px; color: #111827; }
+
+/* Stronger "no break inside" for pdf/print across engines */
+.card, .grid-2, .signatures, .doc-header, .table-wrap, .items-table tr, .totals-grid,
+.avoid-break {
+  break-inside: avoid;
+  page-break-inside: avoid;
+  -webkit-column-break-inside: avoid;
+  -webkit-region-break-inside: avoid;
+  -moz-page-break-inside: avoid;
+}
+
+/* Ensure the page box never collapses top spacing during capture */
+.page {
+  box-sizing: border-box;
+  /* helpful if any top margin collapses into body */
+  padding-top: 0.75in;
+}
+
+/* Optional: for the on-screen Summary rows, keep your layout.
+   We'll switch them to grid in the PDF clone (see script below). */
+

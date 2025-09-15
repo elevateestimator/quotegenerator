@@ -1,10 +1,10 @@
 /* ===========================================================
    Endura Roofing — Quote
-   script.js  (No browser-print fallback; PDF only)
-   - Download PDF never calls window.print()
-   - The "Print" button now triggers the same PDF flow
-   - Discount toggle supported (auto-inserted if missing)
-   - Summary numbers aligned; Tax Rate aligned in PDF
+   script.js  (PDF-only export + Discount toggle + alignment)
+   - Download/Print both generate the same PDF (no browser headers/footers)
+   - Waits for fonts & images before capture
+   - Locks clone to Letter size; normalizes Summary rows for reliability
+   - Discount toggle (auto-inserted if missing), removed from PDF when off or zero
    =========================================================== */
 
 /* ===== Helpers ===== */
@@ -130,27 +130,50 @@ function updateDeposit(grandTotal) {
   }
 }
 
+/* ===== Assets wait ===== */
+// Wait for fonts & images inside an element (so html2canvas gets them)
+async function waitForAssets(root, timeoutMs = 8000) {
+  const waitFonts = (document.fonts && document.fonts.ready) ? document.fonts.ready : Promise.resolve();
+  const imgs = Array.from(root.querySelectorAll('img'));
+  const imgPromises = imgs.map(img => new Promise(res => {
+    if (img.complete && img.naturalWidth > 0) return res();
+    img.addEventListener('load', res, { once: true });
+    img.addEventListener('error', res, { once: true }); // still resolve so we don't hang
+  }));
+  // Timeout safety
+  const timeout = new Promise(res => setTimeout(res, timeoutMs));
+  await Promise.race([Promise.all([waitFonts, Promise.all(imgPromises)]), timeout]);
+}
+
 /* ===== Clean print/PDF clone =====
-   - Removes Discount row when toggle is OFF
-   - Also removes Discount when ON but value is 0
-   - Rewrites Tax Rate cell to align with $ column
+   - Applies discount toggle/zero logic
+   - Rewrites Tax Rate to align with $ column
+   - Normalizes summary rows to 'display:grid' (avoid display:contents issues)
+   - Locks clone size to Letter (prevents "start in the middle" jumps)
 */
 function buildPrintClone() {
   const original = document.getElementById('page');
   const clone = original.cloneNode(true);
 
-  // Toggle state (from UI or saved setting)
+  // Lock dimensions to Letter to prevent layout shifts during rasterization
+  clone.style.width = '8.5in';
+  clone.style.minHeight = '11in';
+  clone.style.margin = '0';
+  clone.style.padding = getComputedStyle(original).padding; // keep your page padding
+
+  // Handle Discount row (toggle OFF or value 0 => remove)
   const enabled = document.getElementById('discount-toggle')
     ? document.getElementById('discount-toggle').checked
-    : getSavedDiscountEnabled();
+    : true; // default if toggle missing
 
   if (!enabled) {
     clone.querySelector('#discount-row')?.remove();
   } else {
-    const subtotal = parseNum(document.getElementById('subtotal')?.textContent || '0');
+    const subtotal = parseFloat((document.getElementById('subtotal')?.textContent || '0').replace(/[^\d.]/g, '')) || 0;
     const type = document.getElementById('discount-type')?.value || 'amount';
-    const raw = parseNum(document.getElementById('discount-value')?.value || '0');
-    const computed = type === 'percent' ? subtotal * (raw / 100) : raw;
+    const raw = (document.getElementById('discount-value')?.value || '').replace(/[,$\s]/g, '');
+    const dnum = parseFloat(raw) || 0;
+    const computed = type === 'percent' ? subtotal * (dnum / 100) : dnum;
 
     if (Math.abs(computed) < 0.0001) {
       clone.querySelector('#discount-row')?.remove();
@@ -163,7 +186,7 @@ function buildPrintClone() {
     }
   }
 
-  // Replace form controls with text for crisp output
+  // Replace inputs/selects/areas with text for crisp output
   const replaceControl = (el, text) => {
     const isArea = el.tagName === 'TEXTAREA';
     const out = document.createElement(isArea ? 'div' : 'span');
@@ -188,12 +211,19 @@ function buildPrintClone() {
     }
   });
 
-  // Normalize the Tax Rate cell so it lines up with the $ column
+  // Normalize the Tax Rate cell so it aligns with the $ column
   const rateCell = clone.querySelector('#taxrate-row .value');
   if (rateCell) {
     const srcRate = (document.getElementById('tax-rate')?.value ?? '13').replace(/[^\d.]/g, '') || '13';
     rateCell.innerHTML = `<span class="curr curr-placeholder">$</span><span class="amt">${srcRate}%</span>`;
   }
+
+  // Convert Summary .row wrappers from display:contents -> grid for reliability
+  clone.querySelectorAll('.totals-grid .row').forEach(row => {
+    row.style.display = 'grid';
+    row.style.gridTemplateColumns = 'auto 1fr var(--valw,16ch)';
+    row.style.alignItems = 'center';
+  });
 
   // Remove screen-only bits
   clone.querySelectorAll('.no-print').forEach(el => el.remove());
@@ -202,33 +232,42 @@ function buildPrintClone() {
 }
 
 async function downloadPDF() {
-  // Always use html2pdf — never fall back to window.print()
+  // Recalc to ensure latest numbers
   recalcAll();
 
   const clone = buildPrintClone();
+
+  // Insert into hidden root so html2canvas computes layout from DOM
   const root = document.getElementById('print-clone-root');
   root.innerHTML = '';
   root.appendChild(clone);
+
+  // Wait for fonts & images to be ready inside the clone
+  await waitForAssets(clone);
 
   const client = $('[data-bind="client_name"]').value?.trim() || 'Client';
   const qno    = $('[data-bind="quote_no"]').value?.trim() || 'Quote';
   const filename = `${client.replace(/[^\w\-]+/g,'_')}_${qno.replace(/[^\w\-]+/g,'_')}.pdf`;
 
   const opt = {
-    margin:       [0, 0, 0, 0],
+    margin: [0, 0, 0, 0],
     filename,
-    image:        { type: 'jpeg', quality: 0.98 },
-    // allowTaint helps when running from file:// or when images lack CORS headers
-    html2canvas:  { scale: 2, useCORS: true, allowTaint: true, backgroundColor: '#ffffff' },
-    jsPDF:        { unit: 'in', format: 'letter', orientation: 'portrait' },
-    pagebreak:    { mode: ['avoid-all', 'css', 'legacy'], avoid: ['.avoid-break', '.card', '.grid-2', '.signatures', '.items-table tr', '.totals-grid'] }
+    image: { type: 'jpeg', quality: 0.98 },
+    html2canvas: {
+      scale: 2,
+      useCORS: true,
+      allowTaint: true,
+      backgroundColor: '#ffffff',
+      // Capture at the clone's full width to prevent reflow
+      windowWidth: clone.scrollWidth
+    },
+    jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' },
+    // Rely on CSS + legacy; avoid-all can sometimes cause odd first-page offsets
+    pagebreak: { mode: ['css', 'legacy'], avoid: ['.avoid-break', '.card', '.grid-2', '.signatures', '.items-table tr', '.totals-grid'] }
   };
 
   try {
     await html2pdf().set(opt).from(clone).save();
-  } catch (e) {
-    console.error('html2pdf error', e);
-    alert('PDF export failed. Try running this file from a local server (not file://), then click Download PDF again.');
   } finally {
     root.innerHTML = '';
   }
@@ -325,15 +364,13 @@ document.addEventListener('DOMContentLoaded', () => {
     updateDeposit(grand);
   }));
 
-  // Toolbar buttons
+  // Toolbar buttons — both generate the same PDF (no browser print)
   $('#btn-add-line').addEventListener('click', () => {
     $('#item-rows').appendChild(makeRow({ qty: 1, price: 0, taxable: true }));
     recalcAll();
   });
-
-  // IMPORTANT: Both buttons now generate the same PDF (no headers/footers)
   $('#btn-download').addEventListener('click', downloadPDF);
-  $('#btn-print').addEventListener('click', downloadPDF); // no window.print()
+  $('#btn-print').addEventListener('click', downloadPDF);
 
   $('#btn-preview').addEventListener('click', togglePreview);
   $('#btn-clear').addEventListener('click', clearForm);
