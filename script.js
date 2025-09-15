@@ -157,35 +157,115 @@ async function waitForAssets(root, timeoutMs = 8000) {
   await Promise.race([Promise.all([waitFonts, Promise.all(imgPromises)]), timeout]);
 }
 
-/* ===== Build clean clone for PDF ===== */
+/* ===== Clean print/PDF clone (with polished letterhead) =====
+   - Builds a branded letterhead in the clone (PDF only)
+   - Applies discount toggle/zero logic
+   - Rewrites Tax Rate to align with $ column
+   - Normalizes Summary rows and lock major blocks against breaking
+*/
 function buildPrintClone() {
   const original = document.getElementById('page');
   const clone = original.cloneNode(true);
 
-  // Pin dimensions in px to avoid inch/px rounding
-  clone.style.width = PAGE_W_CSS + 'px';
-  clone.style.minHeight = PAGE_H_CSS + 'px';
+  // --- Pin dimensions in CSS px for stable capture (Letter @ 96dpi) ---
+  const PX_PER_IN = 96, PAGE_W = 8.5 * PX_PER_IN, PAGE_H = 11 * PX_PER_IN;
+  clone.style.width = PAGE_W + 'px';
+  clone.style.minHeight = PAGE_H + 'px';
   clone.style.margin = '0';
-  clone.style.padding = getComputedStyle(original).padding;
+  clone.style.padding = getComputedStyle(original).padding;  // keep page padding
   clone.style.background = '#ffffff';
   clone.style.boxShadow = 'none';
   clone.style.border = '0';
 
-  // Strong "no break inside" for major blocks
+  // --- PDF-only styles injected into the clone ---
   const style = document.createElement('style');
   style.textContent = `
+    /* no-break for key blocks */
     .card, .grid-2, .signatures, .doc-header, .table-wrap, .items-table tr, .totals-grid, .avoid-break {
       break-inside: avoid; page-break-inside: avoid;
       -webkit-column-break-inside: avoid; -webkit-region-break-inside: avoid;
     }
+    /* Summary rows use consistent 3-col layout in the PDF */
     .totals-grid { grid-template-columns: auto 1fr var(--valw,16ch) !important; }
+
+    /* --- Letterhead (PDF) --- */
+    .pdf-letterhead { display:grid; grid-template-columns: 160px 1fr; align-items:center; gap:14px; }
+    .pdf-letterhead .pdf-logo { width: 160px; height:auto; object-fit: contain; }
+    .pdf-letterhead .pdf-company { font: 800 18px/1.2 Inter, ui-sans-serif, system-ui; color: var(--brand, #0267b5); letter-spacing: .2px; }
+    .pdf-letterhead .pdf-contact { display:flex; flex-wrap:wrap; gap: 6px 10px; margin-top: 6px; font: 12px/1.5 Inter, ui-sans-serif, system-ui; color:#374151; }
+    .pdf-letterhead .pdf-contact > span { white-space: nowrap; }
+    .pdf-letterhead .pdf-contact > span:not(:first-child)::before { content:"•"; margin: 0 8px; color:#9ca3af; }
+
+    /* thin blue accent under the letterhead */
+    .pdf-letterhead + .pdf-accent { height:3px; background: linear-gradient(90deg, #0267b5, rgba(2,103,181,.35)); border-radius: 2px; margin: 8px 0 6px; }
+
+    /* Quote meta: small label + bold value */
+    .meta-grid { grid-template-columns: repeat(4, 1fr) !important; gap: 10px !important; }
+    .meta-grid label { display:grid; gap:4px; font-size:10px; letter-spacing:.04em; text-transform:uppercase; color:#6b7280; }
+    .meta-grid label > span { font-size:12px; font-weight:700; color:#111827; }
+
+    /* keep header from ever breaking */
+    .doc-header { break-inside: avoid; page-break-inside: avoid; }
   `;
   clone.prepend(style);
 
-  // Discount (toggle OFF or computed 0 => remove row)
+  // --------- Build a tidy letterhead for the PDF (uses live values) ---------
+  const getVal = (k) => (document.querySelector(`[data-bind="${k}"]`)?.value || '').trim();
+  const name   = getVal('company_name') || 'Endura Roofing';
+  const addr1  = getVal('company_addr1');
+  const addr2  = getVal('company_addr2');
+  const phone  = getVal('company_phone');
+  const email  = getVal('company_email');
+  const web    = getVal('company_web');
+
+  const contactParts = [];
+  const addr = [addr1, addr2].filter(Boolean).join(', ').trim();
+  if (addr)  contactParts.push(addr);
+  if (phone) contactParts.push(phone);
+  if (email) contactParts.push(email);
+  if (web)   contactParts.push(web.replace(/^https?:\/\//i, ''));
+
+  // Find the existing brand row and rebuild it for PDF
+  const header = clone.querySelector('.doc-header');
+  const oldBrandRow = clone.querySelector('.brand-row');
+  if (header && oldBrandRow) {
+    const logoFromClone = oldBrandRow.querySelector('img.logo') || document.createElement('img');
+    // New letterhead container
+    const lh = document.createElement('div');
+    lh.className = 'pdf-letterhead avoid-break';
+
+    const left = document.createElement('div');
+    // Move the cloned logo into the new container and style it
+    logoFromClone.classList.add('pdf-logo');
+    left.appendChild(logoFromClone);
+
+    const right = document.createElement('div');
+    const nameEl = document.createElement('div');
+    nameEl.className = 'pdf-company';
+    nameEl.textContent = name;
+    right.appendChild(nameEl);
+
+    const contactEl = document.createElement('div');
+    contactEl.className = 'pdf-contact';
+    contactParts.forEach(t => { const s = document.createElement('span'); s.textContent = t; contactEl.appendChild(s); });
+    right.appendChild(contactEl);
+
+    lh.appendChild(left);
+    lh.appendChild(right);
+
+    // Replace old brand row with the new letterhead
+    header.replaceChild(lh, oldBrandRow);
+
+    // Blue accent rule under the header
+    const accent = document.createElement('div');
+    accent.className = 'pdf-accent';
+    header.insertBefore(accent, header.querySelector('.meta-grid'));
+  }
+
+  // --------- Discount toggle/value logic (unchanged) ---------
   const enabled = document.getElementById('discount-toggle')
     ? document.getElementById('discount-toggle').checked
-    : true;
+    : true; // default if toggle missing
 
   if (!enabled) {
     clone.querySelector('#discount-row')?.remove();
@@ -195,6 +275,7 @@ function buildPrintClone() {
     const raw = (document.getElementById('discount-value')?.value || '').replace(/[,$\s]/g, '');
     const dnum = parseFloat(raw) || 0;
     const computed = type === 'percent' ? subtotal * (dnum / 100) : dnum;
+
     if (Math.abs(computed) < 0.0001) {
       clone.querySelector('#discount-row')?.remove();
     } else {
@@ -206,7 +287,7 @@ function buildPrintClone() {
     }
   }
 
-  // Replace inputs/selects/areas with text for crisp output
+  // --------- Replace inputs/selects/areas with text for crisp output ---------
   const replaceControl = (el, text) => {
     const isArea = el.tagName === 'TEXTAREA';
     const out = document.createElement(isArea ? 'div' : 'span');
@@ -231,14 +312,14 @@ function buildPrintClone() {
     }
   });
 
-  // Align Tax Rate like currency rows
+  // Align the Tax Rate row with the currency column
   const rateCell = clone.querySelector('#taxrate-row .value');
   if (rateCell) {
     const srcRate = (document.getElementById('tax-rate')?.value ?? '13').replace(/[^\d.]/g, '') || '13';
     rateCell.innerHTML = `<span class="curr curr-placeholder">$</span><span class="amt">${srcRate}%</span>`;
   }
 
-  // Remove screen-only bits and the last "X" column
+  // Remove screen-only bits and the last "X" column in Items for the PDF
   clone.querySelectorAll('.no-print').forEach(el => el.remove());
   const itemsTable = clone.querySelector('#items-table');
   if (itemsTable) {
