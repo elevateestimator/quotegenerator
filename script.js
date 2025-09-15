@@ -1,23 +1,23 @@
 /* ===========================================================
    Endura Roofing — Quote
-   script.js  (PDF-only export + Discount toggle + alignment)
-   - Download/Print both generate the same PDF (no browser headers/footers)
+   script.js  (PDF-only export + sandbox + px Letter sizing)
+   - Off-screen sandbox (no clipping/left-shift)
    - Waits for fonts & images before capture
-   - Uses an off-screen sandbox (not clipped) to avoid left-shift/cropping
-   - Locks clone to Letter size; normalizes Summary rows for reliability
-   - Discount toggle (auto-inserted if missing), removed from PDF when off or zero
+   - Clone sized to 816x1056 px (Letter @ 96dpi)
+   - Discount toggle respected; discount row removed when off/zero
+   - Drops "no-print" column from Items in PDF
+   - Summary values aligned; Tax Rate aligned in PDF
    =========================================================== */
 
 /* ===== Helpers ===== */
 const $  = (sel, ctx = document) => ctx.querySelector(sel);
 const $$ = (sel, ctx = document) => Array.from(ctx.querySelectorAll(sel));
+const PX_PER_IN = 96, PAGE_W = 8.5 * PX_PER_IN, PAGE_H = 11 * PX_PER_IN;
 
 const formatMoney = (n) =>
   (Number.isFinite(n) ? n : 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-
 const moneyWithSymbol = (n) =>
   (Number.isFinite(n) ? n : 0).toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
-
 const parseNum = (str) => {
   if (str == null) return 0;
   const cleaned = String(str).replace(/[,$\s]/g, '');
@@ -32,10 +32,9 @@ const getSavedDiscountEnabled = () => {
   return saved === null ? true : saved === 'true';
 };
 let discountEnabled = getSavedDiscountEnabled();
-
 function toggleDiscountRow(on) {
   const row = document.getElementById('discount-row');
-  if (row) row.style.display = on ? '' : 'none'; // inline style overrides display: contents
+  if (row) row.style.display = on ? '' : 'none';
 }
 
 /* ===== Defaults ===== */
@@ -44,15 +43,11 @@ function setDefaults() {
   const pad = (n) => String(n).padStart(2, '0');
   const toISO = (d) => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
   const expires = new Date(today); expires.setDate(today.getDate() + 30);
-
   const dateEl = $('[data-bind="quote_date"]');
   const expEl  = $('[data-bind="quote_expires"]');
   if (dateEl && !dateEl.value) dateEl.value = toISO(today);
   if (expEl && !expEl.value)   expEl.value  = toISO(expires);
-
-  // Default tax to 13% if empty
-  const taxEl = $('#tax-rate');
-  if (taxEl && !taxEl.value) taxEl.value = '13';
+  if ($('#tax-rate') && !$('#tax-rate').value) $('#tax-rate').value = '13';
 }
 
 /* ===== Line Items ===== */
@@ -81,8 +76,7 @@ function ensureAtLeastOneRow() {
 /* ===== Totals ===== */
 function recalcAll() {
   const rows = $$('.item-row');
-  let subtotal = 0;
-  let taxableBase = 0;
+  let subtotal = 0, taxableBase = 0;
 
   rows.forEach(row => {
     const qty = parseNum($('.qty', row).value);
@@ -96,30 +90,30 @@ function recalcAll() {
 
   $('#subtotal').textContent = formatMoney(subtotal);
 
-  // ----- Discount (ignored when toggle is OFF) -----
+  // Discount (ignored when toggle OFF)
   const discountActive = !!discountEnabled;
   const discountType = discountActive ? ($('#discount-type')?.value ?? 'amount') : 'amount';
   const discountVal  = discountActive ? parseNum($('#discount-value')?.value ?? 0) : 0;
   const discount     = (discountType === 'percent') ? (subtotal * (discountVal / 100)) : discountVal;
   const discounted   = Math.max(0, subtotal - discount);
 
-  // ----- Tax -----
+  // Tax
   const taxRatePct   = parseNum($('#tax-rate').value);
   const taxRate      = taxRatePct / 100;
-  const taxBaseAfterDiscount = taxableBase > 0 ? (taxableBase - (discount * (taxableBase / Math.max(1, subtotal)))) : 0;
-  const tax          = Math.max(0, taxBaseAfterDiscount * taxRate);
+  const taxBaseAfterDiscount =
+    taxableBase > 0 ? (taxableBase - (discount * (taxableBase / Math.max(1, subtotal)))) : 0;
+  const tax = Math.max(0, taxBaseAfterDiscount * taxRate);
   $('#tax-amount').textContent = formatMoney(tax);
 
-  // ----- Fees -----
-  const fees         = parseNum($('#fees').value);
+  // Fees
+  const fees  = parseNum($('#fees').value);
 
-  // ----- Grand Total -----
-  const grand        = Math.max(0, discounted + tax + fees);
+  // Grand Total
+  const grand = Math.max(0, discounted + tax + fees);
   $('#grand-total').textContent = formatMoney(grand);
 
   updateDeposit(grand);
 }
-
 function updateDeposit(grandTotal) {
   const mode = $$('input[name="deposit_mode"]').find(r => r.checked)?.value || 'auto';
   const depositInput = $('#deposit-due');
@@ -131,8 +125,7 @@ function updateDeposit(grandTotal) {
   }
 }
 
-/* ===== Assets wait ===== */
-// Wait for fonts & images inside an element (so html2canvas gets them)
+/* ===== Assets wait (fonts & images) ===== */
 async function waitForAssets(root, timeoutMs = 8000) {
   const waitFonts = (document.fonts && document.fonts.ready) ? document.fonts.ready : Promise.resolve();
   const imgs = Array.from(root.querySelectorAll('img'));
@@ -141,32 +134,40 @@ async function waitForAssets(root, timeoutMs = 8000) {
     img.addEventListener('load', res, { once: true });
     img.addEventListener('error', res, { once: true }); // still resolve so we don't hang
   }));
-  // Timeout safety
   const timeout = new Promise(res => setTimeout(res, timeoutMs));
   await Promise.race([Promise.all([waitFonts, Promise.all(imgPromises)]), timeout]);
 }
 
-/* ===== Clean print/PDF clone =====
-   - Applies discount toggle/zero logic
-   - Rewrites Tax Rate to align with $ column
-   - Normalizes summary rows to 'display:grid' (avoid display:contents issues)
-   - Locks clone size to Letter (prevents "start in the middle" jumps)
-*/
+/* ===== PDF clone ===== */
 function buildPrintClone() {
   const original = document.getElementById('page');
   const clone = original.cloneNode(true);
 
-  // Lock dimensions to Letter to prevent layout shifts during rasterization
-  clone.style.width = '8.5in';
-  clone.style.minHeight = '11in';
+  // Pin dimensions in PX to avoid inch/px rounding issues
+  clone.style.width = PAGE_W + 'px';
+  clone.style.minHeight = PAGE_H + 'px';
   clone.style.margin = '0';
   clone.style.padding = getComputedStyle(original).padding; // keep your page padding
   clone.style.background = '#ffffff';
+  clone.style.boxShadow = 'none';
+  clone.style.border = '0';
+
+  // Inject small PDF-only CSS into the clone for reliable layout & no breaks
+  const style = document.createElement('style');
+  style.textContent = `
+    .card, .grid-2, .signatures, .doc-header, .table-wrap, .items-table tr, .totals-grid, .avoid-break {
+      break-inside: avoid; page-break-inside: avoid;
+      -webkit-column-break-inside: avoid; -webkit-region-break-inside: avoid;
+    }
+    /* Ensure totals-grid rows use the same 3-column layout inside the clone */
+    .totals-grid { grid-template-columns: auto 1fr var(--valw,16ch) !important; }
+  `;
+  clone.prepend(style);
 
   // Handle Discount row (toggle OFF or value 0 => remove)
   const enabled = document.getElementById('discount-toggle')
     ? document.getElementById('discount-toggle').checked
-    : true; // default if toggle missing
+    : true;
 
   if (!enabled) {
     clone.querySelector('#discount-row')?.remove();
@@ -176,7 +177,6 @@ function buildPrintClone() {
     const raw = (document.getElementById('discount-value')?.value || '').replace(/[,$\s]/g, '');
     const dnum = parseFloat(raw) || 0;
     const computed = type === 'percent' ? subtotal * (dnum / 100) : dnum;
-
     if (Math.abs(computed) < 0.0001) {
       clone.querySelector('#discount-row')?.remove();
     } else {
@@ -213,36 +213,39 @@ function buildPrintClone() {
     }
   });
 
-  // Normalize the Tax Rate cell so it aligns with the $ column
+  // Align Tax Rate cell with the $ column
   const rateCell = clone.querySelector('#taxrate-row .value');
   if (rateCell) {
     const srcRate = (document.getElementById('tax-rate')?.value ?? '13').replace(/[^\d.]/g, '') || '13';
     rateCell.innerHTML = `<span class="curr curr-placeholder">$</span><span class="amt">${srcRate}%</span>`;
   }
 
-  // Convert Summary .row wrappers from display:contents -> grid for reliability
-  clone.querySelectorAll('.totals-grid .row').forEach(row => {
-    row.style.display = 'grid';
-    row.style.gridTemplateColumns = 'auto 1fr var(--valw,16ch)';
-    row.style.alignItems = 'center';
-  });
+  // Remove screen-only bits (and the last "X" column robustly)
+  clone.querySelectorAll('.no-print').forEach(el => el.remove());
+  const itemsTable = clone.querySelector('#items-table');
+  if (itemsTable) {
+    // Drop last col from colgroup
+    const cg = itemsTable.querySelector('colgroup');
+    if (cg && cg.lastElementChild) cg.removeChild(cg.lastElementChild);
+    // Remove last TH/TD if still present
+    itemsTable.querySelectorAll('thead tr th:last-child, tbody tr td:last-child').forEach(el => el.remove());
+  }
 
   return clone;
 }
 
-/* ===== Off-screen sandbox (prevents clipping/cropping) ===== */
+/* ===== Off-screen sandbox (visible to layout, not clipped) ===== */
 function createPdfSandbox() {
   const sandbox = document.createElement('div');
   sandbox.id = 'pdf-sandbox';
-  sandbox.style.position = 'fixed';
+  sandbox.style.position = 'absolute';
   sandbox.style.left = '0';
   sandbox.style.top = '0';
-  sandbox.style.zIndex = '-1';           // behind everything
-  sandbox.style.opacity = '0';           // invisible but still lays out
+  sandbox.style.opacity = '0';
   sandbox.style.pointerEvents = 'none';
   sandbox.style.background = '#ffffff';
-  sandbox.style.width = '8.5in';
-  sandbox.style.minHeight = '11in';
+  sandbox.style.width = PAGE_W + 'px';
+  sandbox.style.minHeight = PAGE_H + 'px';
   document.body.appendChild(sandbox);
   return sandbox;
 }
@@ -250,17 +253,16 @@ function createPdfSandbox() {
 /* ===== Export ===== */
 async function downloadPDF() {
   try {
-    // Recalc to ensure latest numbers
     recalcAll();
 
     const clone = buildPrintClone();
 
-    // Render clone in an off-screen sandbox (NOT clipped)
+    // Render clone in off-screen sandbox (not clipped)
     const sandbox = createPdfSandbox();
-    sandbox.innerHTML = ''; // just in case
+    sandbox.innerHTML = '';
     sandbox.appendChild(clone);
 
-    // Wait for fonts & images to be ready inside the clone
+    // Wait for fonts & images inside the clone
     await waitForAssets(clone);
 
     const client = $('[data-bind="client_name"]').value?.trim() || 'Client';
@@ -278,18 +280,14 @@ async function downloadPDF() {
         backgroundColor: '#ffffff',
         scrollX: 0,
         scrollY: 0,
-        // Use the rendered size in the sandbox to avoid left-shift
-        windowWidth: clone.getBoundingClientRect().width,
-        windowHeight: clone.getBoundingClientRect().height
+        windowWidth: PAGE_W,
+        windowHeight: Math.max(PAGE_H, clone.scrollHeight)
       },
-      jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' },
-      // Rely on CSS + legacy; avoid-all sometimes causes odd first-page offsets
+      jsPDF: { unit: 'pt', format: 'letter', orientation: 'portrait' },
       pagebreak: { mode: ['css', 'legacy'], avoid: ['.avoid-break', '.card', '.grid-2', '.signatures', '.items-table tr', '.totals-grid'] }
     };
 
     await html2pdf().set(opt).from(clone).save();
-
-    // Cleanup
     sandbox.remove();
   } catch (e) {
     console.error('PDF export error', e);
@@ -308,59 +306,37 @@ function togglePreview() {
     else el.removeAttribute('disabled');
   });
 }
-
 function clearForm() {
   if (!confirm('Clear all fields and line items?')) return;
   $$('input[type="text"], input[type="date"], textarea').forEach(el => {
     if (el.id === 'deposit-due') return;
     el.value = '';
   });
-  $('#discount-type').value = 'amount';
-  $('#discount-value').value = '';
-  $('#tax-rate').value = '13';
-  $('#fees').value = '';
-  $('#item-rows').innerHTML = '';
-  ensureAtLeastOneRow();
-  recalcAll();
+  $('#discount-type').value = 'amount'; $('#discount-value').value = '';
+  $('#tax-rate').value = '13'; $('#fees').value = '';
+  $('#item-rows').innerHTML = ''; ensureAtLeastOneRow(); recalcAll();
 }
 
 document.addEventListener('DOMContentLoaded', () => {
   setDefaults();
 
-  // Auto-insert the Discount toggle beside the Clear button if not present
+  // Auto-insert the Discount toggle beside Clear if not present
   let discountToggle = document.getElementById('discount-toggle');
   if (!discountToggle) {
     const left = document.querySelector('.toolbar .left');
     if (left) {
       const label = document.createElement('label');
-      label.className = 'switch no-print';
-      label.title = 'Show/Hide Discount';
-
-      const input = document.createElement('input');
-      input.type = 'checkbox';
-      input.id = 'discount-toggle';
-      input.checked = discountEnabled;
-
-      const span = document.createElement('span');
-      span.textContent = 'Discount';
-
-      label.appendChild(input);
-      label.appendChild(span);
-
+      label.className = 'switch no-print'; label.title = 'Show/Hide Discount';
+      const input = document.createElement('input'); input.type = 'checkbox'; input.id = 'discount-toggle'; input.checked = discountEnabled;
+      const span = document.createElement('span'); span.textContent = 'Discount';
+      label.appendChild(input); label.appendChild(span);
       const clearBtn = document.getElementById('btn-clear');
-      if (clearBtn) {
-        clearBtn.insertAdjacentElement('afterend', label);
-      } else {
-        left.appendChild(label);
-      }
+      if (clearBtn) clearBtn.insertAdjacentElement('afterend', label); else left.appendChild(label);
       discountToggle = input;
     }
   } else {
-    // If it exists in HTML, sync with saved state
     discountToggle.checked = discountEnabled;
   }
-
-  // Apply initial visibility and wire change handler
   toggleDiscountRow(discountEnabled);
   if (discountToggle) {
     discountToggle.addEventListener('change', (e) => {
@@ -376,26 +352,25 @@ document.addEventListener('DOMContentLoaded', () => {
   body.appendChild(makeRow({ qty: 1, price: 0, taxable: true }));
   body.appendChild(makeRow({ qty: 1, price: 0, taxable: false }));
 
-  // Inputs that affect totals
+  // Inputs affecting totals
   ['#discount-type', '#discount-value', '#tax-rate', '#fees'].forEach(sel => {
     $(sel).addEventListener('input', recalcAll);
     $(sel).addEventListener('change', recalcAll);
   });
 
-  // Deposit mode handler
+  // Deposit mode
   $$('input[name="deposit_mode"]').forEach(r => r.addEventListener('change', () => {
     const grand = parseNum($('#grand-total').textContent);
     updateDeposit(grand);
   }));
 
-  // Toolbar buttons — both generate the same PDF (no browser print)
+  // Toolbar
   $('#btn-add-line').addEventListener('click', () => {
     $('#item-rows').appendChild(makeRow({ qty: 1, price: 0, taxable: true }));
     recalcAll();
   });
   $('#btn-download').addEventListener('click', downloadPDF);
   $('#btn-print').addEventListener('click', downloadPDF);
-
   $('#btn-preview').addEventListener('click', togglePreview);
   $('#btn-clear').addEventListener('click', clearForm);
 
