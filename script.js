@@ -287,6 +287,32 @@ function buildPrintClone() {
     }
   }
 
+  /* --------- PDF: Deposit section should only show the amount --------- */
+  {
+    // Find the Deposit card in the clone
+    const depositCard = clone.querySelector('#deposit-due')?.closest('.card');
+    if (depositCard) {
+      // 1) Remove the Auto/Custom radio options (and common wrappers)
+      depositCard.querySelectorAll('.inline-controls, .radio-group, input[type="radio"], label.radio')
+        .forEach(el => el.remove());
+
+      // 2) Replace the "Deposit Due" input with a bold, formatted amount
+      const originalVal = document.getElementById('deposit-due')?.value || '';
+      const numeric     = parseNum(originalVal);
+      const displayVal  = (numeric > 0)
+        ? '$' + numeric.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+        : (originalVal.trim() || '$0.00');
+
+      const dueInputClone = depositCard.querySelector('#deposit-due');
+      if (dueInputClone) {
+        const out = document.createElement('span');
+        out.textContent = displayVal;
+        out.style.fontWeight = '700';
+        dueInputClone.parentNode.replaceChild(out, dueInputClone);
+      }
+    }
+  }
+
   // --------- Replace inputs/selects/areas with text for crisp output ---------
   const replaceControl = (el, text) => {
     const isArea = el.tagName === 'TEXTAREA';
