@@ -1,22 +1,28 @@
 /* ===========================================================
    Endura Roofing — Invoice
    invoice.js  (Manual PDF export + smart page breaks + auto libs)
-   Based on your quote exporter with invoice-specific tweaks:
-   - Adds HST number to letterhead
-   - Adds Terms & automatic Due Date
-   - Supports Amount Paid & Balance Due
-   - Uses CAD currency formatting
+   - Reuses the quote app's structure with invoice semantics
+   - Off-screen sandbox (not clipped), waits for fonts & images
+   - Clone sized to 816x1056 px (Letter @ 96dpi)
+   - Smart cuts between cards/sections to avoid mid-card splits
+   - Discount toggle respected; removed from PDF when off/zero
+   - Summary values aligned; Tax Rate aligned in PDF
    =========================================================== */
 
 /* ===== Shortcuts ===== */
 const $  = (sel, ctx = document) => ctx.querySelector(sel);
 const $$ = (sel, ctx = document) => Array.from(ctx.querySelectorAll(sel));
 
-/* ===== Money helpers (CAD) ===== */
+/* Safe event binder */
+function on(sel, evt, fn, ctx=document){ const el = (typeof sel==='string')? ctx.querySelector(sel): sel; if(!el){ console.warn('Missing element for selector:', sel); return false; } el.addEventListener(evt, fn); return true; }
+function ons(selectors, evt, fn){ return selectors.map(s => on(s, evt, fn)).every(Boolean); }
+
+
+/* ===== Money helpers ===== */
 const formatMoney = (n) =>
   (Number.isFinite(n) ? n : 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const moneyWithSymbol = (n) =>
-  (Number.isFinite(n) ? n : 0).toLocaleString(undefined, { style: 'currency', currency: 'CAD', maximumFractionDigits: 2 });
+  (Number.isFinite(n) ? n : 0).toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
 const parseNum = (str) => {
   if (str == null) return 0;
   const cleaned = String(str).replace(/[,$\s]/g, '');
@@ -29,58 +35,27 @@ const PX_PER_IN = 96;
 const PAGE_W_CSS = Math.round(8.5 * PX_PER_IN);  // 816
 const PAGE_H_CSS = Math.round(11  * PX_PER_IN);  // 1056
 
-/* ===== Discount toggle state (persisted) ===== */
+/* ===== Discount toggle state ===== */
 const LS_KEY_DISCOUNT = 'discountEnabled';
 const getSavedDiscountEnabled = () => {
   const saved = localStorage.getItem(LS_KEY_DISCOUNT);
   return saved === null ? true : saved === 'true';
 };
 let discountEnabled = getSavedDiscountEnabled();
-function toggleDiscountRow(on) {
-  const row = document.getElementById('discount-row');
-  if (row) row.style.display = on ? '' : 'none';
-}
-
-/* ===== Date helpers ===== */
-const pad = (n) => String(n).padStart(2, '0');
-const toISO = (d) => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
-function addDays(d, days) { const c = new Date(d); c.setDate(c.getDate() + days); return c; }
+function toggleDiscountRow(on) { const row = document.getElementById('discount-row'); if (row) row.style.display = on ? '' : 'none'; }
 
 /* ===== Defaults ===== */
 function setDefaults() {
   const today = new Date();
-  const invDateEl = $('#invoice-date');
-  if (invDateEl && !invDateEl.value) invDateEl.value = toISO(today);
+  const pad = (n) => String(n).padStart(2, '0');
+  const toISO = (d) => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+  const due = new Date(today); due.setDate(today.getDate() + 15); // Net 15 default
 
-  const termsSel = $('#terms');
-  const dueEl = $('#due-date');
-  if (termsSel && dueEl && !dueEl.value) {
-    // Default: Due on Receipt (today)
-    dueEl.value = toISO(today);
-  }
+  const dateEl = $('[data-bind="invoice_date"]');
+  const dueEl  = $('[data-bind="invoice_due"]');
+  if (dateEl && !dateEl.value) dateEl.value = toISO(today);
+  if (dueEl && !dueEl.value)   dueEl.value  = toISO(due);
   if ($('#tax-rate') && !$('#tax-rate').value) $('#tax-rate').value = '13';
-}
-
-/* ===== Terms / Due date sync ===== */
-function syncDueDateFromTerms() {
-  const terms = $('#terms')?.value || 'due';
-  const invDate = $('#invoice-date')?.value ? new Date($('#invoice-date').value) : new Date();
-  const dueEl = $('#due-date');
-  if (!dueEl) return;
-  if (terms === 'custom') return; // leave user's custom date
-  const days = terms === 'due' ? 0 : parseInt(terms, 10);
-  dueEl.value = toISO(addDays(invDate, days || 0));
-}
-function onUserChangedDueDate() {
-  const dueEl = $('#due-date');
-  const invDate = $('#invoice-date')?.value ? new Date($('#invoice-date').value) : new Date();
-  if (!dueEl) return;
-  // If user sets due date that doesn't match current terms, switch to custom
-  const terms = $('#terms')?.value || 'due';
-  const expected = (terms === 'custom')
-    ? null
-    : toISO(addDays(invDate, terms === 'due' ? 0 : parseInt(terms, 10)));
-  if (expected && expected !== dueEl.value) $('#terms').value = 'custom';
 }
 
 /* ===== Items ===== */
@@ -106,7 +81,7 @@ function ensureAtLeastOneRow() {
   if (!body.children.length) body.appendChild(makeRow({ qty: 1, price: 0, taxable: true }));
 }
 
-/* ===== Totals & status ===== */
+/* ===== Totals ===== */
 function recalcAll() {
   const rows = $$('.item-row');
   let subtotal = 0, taxableBase = 0;
@@ -123,7 +98,7 @@ function recalcAll() {
 
   $('#subtotal').textContent = formatMoney(subtotal);
 
-  // Discount
+  // Discount (ignore if toggle OFF)
   const discountActive = !!discountEnabled;
   const discountType = discountActive ? ($('#discount-type')?.value ?? 'amount') : 'amount';
   const discountVal  = discountActive ? parseNum($('#discount-value')?.value ?? 0) : 0;
@@ -143,29 +118,10 @@ function recalcAll() {
   const grand = Math.max(0, discounted + tax + fees);
   $('#grand-total').textContent = formatMoney(grand);
 
-  // Paid & balance
+  // Payments & balance
   const paid = parseNum($('#amount-paid').value);
   const balance = Math.max(0, grand - paid);
   $('#balance-due').textContent = formatMoney(balance);
-
-  updateStatus(grand, paid);
-}
-function updateStatus(grandTotal, paid) {
-  const dueStr = $('#due-date')?.value;
-  const status = $('#status');
-  if (!status) return;
-  const now = new Date();
-  const due = dueStr ? new Date(dueStr + 'T00:00:00') : now;
-  if (paid >= grandTotal - 0.009) {
-    status.textContent = 'Paid';
-    status.className = 'status-pill status-paid';
-  } else if (now > due) {
-    status.textContent = 'Overdue';
-    status.className = 'status-pill status-overdue';
-  } else {
-    status.textContent = 'Open';
-    status.className = 'status-pill status-open';
-  }
 }
 
 /* ===== Dynamically load libs if needed ===== */
@@ -216,12 +172,11 @@ function buildPrintClone() {
   // PDF-only styles
   const style = document.createElement('style');
   style.textContent = `
-    .card, .grid-2, .signatures, .doc-header, .table-wrap, .items-table tr, .totals-grid, .avoid-break {
+    .card, .grid-2, .doc-header, .table-wrap, .items-table tr, .totals-grid, .avoid-break {
       break-inside: avoid; page-break-inside: avoid;
       -webkit-column-break-inside: avoid; -webkit-region-break-inside: avoid;
     }
     .card { background: #ffffff !important; }
-
     .totals-grid { grid-template-columns: auto 1fr var(--valw,16ch) !important; }
 
     .pdf-letterhead { display:grid; grid-template-columns: 160px 1fr; align-items:center; gap:14px; }
@@ -270,7 +225,7 @@ function buildPrintClone() {
     const right = document.createElement('div');
     const nameEl = document.createElement('div');
     nameEl.className = 'pdf-company';
-    nameEl.textContent = name;
+    nameEl.textContent = name + ' — Invoice';
     right.appendChild(nameEl);
 
     const contactEl = document.createElement('div');
@@ -314,7 +269,7 @@ function buildPrintClone() {
   // Remove screen-only bits
   clone.querySelectorAll('.no-print').forEach(el => el.remove());
 
-  // Normalize the Items table so "Line Total" remains crisp
+  // Normalize the Items table for crisp totals column
   const itemsTable = clone.querySelector('#items-table');
   if (itemsTable) {
     itemsTable.querySelectorAll('thead th.no-print, tbody td.no-print').forEach(el => el.remove());
@@ -326,7 +281,10 @@ function buildPrintClone() {
     itemsTable.style.tableLayout = 'fixed';
     itemsTable.style.width = '100%';
     const wrap = itemsTable.closest('.table-wrap');
-    if (wrap) { wrap.style.overflow = 'visible'; wrap.style.width = '100%'; }
+    if (wrap) {
+      wrap.style.overflow = 'visible';
+      wrap.style.width = '100%';
+    }
     itemsTable.querySelectorAll('td.line-total span').forEach(s => {
       s.style.display = 'inline-block';
       s.style.minWidth = '6ch';
@@ -367,6 +325,19 @@ function buildPrintClone() {
     rateCell.innerHTML = `<span class="curr curr-placeholder">$</span><span class="amt">${srcRate}%</span>`;
   }
 
+  // Amount Paid: ensure currency formatting
+  const paidEl = document.getElementById('amount-paid');
+  if (paidEl) {
+    const paidVal = (parseNum(paidEl.value) || 0).toLocaleString(undefined, { minimumFractionDigits:2, maximumFractionDigits:2 });
+    const paidCell = clone.querySelector('#paid-row .value');
+    if (paidCell) paidCell.innerHTML = `<span class="curr">$</span><span class="amt">${paidVal}</span>`;
+  }
+
+  // Balance Due already in DOM as number; ensure 2dp
+  const bal = parseFloat((document.getElementById('balance-due')?.textContent || '0').replace(/[^\d.]/g, '')) || 0;
+  const balCell = clone.querySelector('#balance-row .value .amt');
+  if (balCell) balCell.textContent = bal.toLocaleString(undefined, { minimumFractionDigits:2, maximumFractionDigits:2 });
+
   return clone;
 }
 
@@ -389,8 +360,7 @@ function createPdfSandbox() {
 /* ===== Compute smart page cuts (between sections) ===== */
 function computeCutPositionsPx(clone, scaleFactor, idealPageHeightPxCanvas) {
   const selectors = [
-    '.doc-header', '.grid-2', '.card', '.signatures',
-    '.table-wrap', '.items-table', '.totals', '.avoid-break'
+    '.doc-header', '.grid-2', '.card', '.table-wrap', '.items-table', '.totals', '.avoid-break'
   ];
   const rect = clone.getBoundingClientRect();
   const bottomsCss = new Set([0]); // include top of page
@@ -513,8 +483,8 @@ async function downloadPDF() {
     }
 
     const client = $('[data-bind="client_name"]').value?.trim() || 'Client';
-    const inv    = $('[data-bind="invoice_no"]').value?.trim() || 'Invoice';
-    const filename = `${client.replace(/[^\w\-]+/g,'_')}_${inv.replace(/[^\w\-]+/g,'_')}.pdf`;
+    const invno  = $('[data-bind="invoice_no"]').value?.trim() || 'Invoice';
+    const filename = `${client.replace(/[^\w\-]+/g,'_')}_${invno.replace(/[^\w\-]+/g,'_')}.pdf`;
     pdf.save(filename);
 
     sandbox.remove();
@@ -545,15 +515,14 @@ function clearForm() {
   $('#discount-type').value = 'amount'; $('#discount-value').value = '';
   $('#tax-rate').value = '13'; $('#fees').value = '';
   $('#item-rows').innerHTML = ''; ensureAtLeastOneRow(); recalcAll();
-  setDefaults(); syncDueDateFromTerms();
 }
 
 /* ===== Boot ===== */
+window.addEventListener('error', (e) => { console.error('[Invoice JS Error]', e.message, e.filename+':'+e.lineno+':'+e.colno); });
 document.addEventListener('DOMContentLoaded', () => {
   setDefaults();
-  syncDueDateFromTerms();
 
-  // Discount toggle (persisted)
+  // Discount toggle beside Clear (auto-create if missing)
   let discountToggle = document.getElementById('discount-toggle');
   if (!discountToggle) {
     const left = document.querySelector('.toolbar .left');
@@ -582,29 +551,26 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Initial rows
   const body = $('#item-rows');
-  body.appendChild(makeRow({ qty: 1, price: 0, taxable: true }));
-  body.appendChild(makeRow({ qty: 1, price: 0, taxable: false }));
+  if(body){
+    body.appendChild(makeRow({ qty: 1, price: 0, taxable: true }));
+    body.appendChild(makeRow({ qty: 1, price: 0, taxable: false }));
+  }
 
   // Recalc on inputs
   ['#discount-type', '#discount-value', '#tax-rate', '#fees', '#amount-paid'].forEach(sel => {
-    $(sel).addEventListener('input', recalcAll);
-    $(sel).addEventListener('change', recalcAll);
+    on(sel, 'input', recalcAll);
+    on(sel, 'change', recalcAll);
   });
 
-  // Terms & dates
-  $('#terms').addEventListener('change', () => { syncDueDateFromTerms(); recalcAll(); });
-  $('#invoice-date').addEventListener('change', () => { syncDueDateFromTerms(); recalcAll(); });
-  $('#due-date').addEventListener('change', () => { onUserChangedDueDate(); recalcAll(); });
-
-  // Toolbar
-  $('#btn-add-line').addEventListener('click', () => {
+  // Toolbar — both buttons export the same clean PDF
+  on('#btn-add-line','click', () => {
     $('#item-rows').appendChild(makeRow({ qty: 1, price: 0, taxable: true }));
     recalcAll();
   });
-  $('#btn-download').addEventListener('click', downloadPDF);
-  $('#btn-print').addEventListener('click', downloadPDF);
-  $('#btn-preview').addEventListener('click', togglePreview);
-  $('#btn-clear').addEventListener('click', clearForm);
+  on('#btn-download','click', downloadPDF);
+  on('#btn-print','click', downloadPDF);
+  on('#btn-preview','click', togglePreview);
+  on('#btn-clear','click', clearForm);
 
   recalcAll();
 });

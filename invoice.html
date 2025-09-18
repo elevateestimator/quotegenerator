@@ -4,9 +4,9 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Endura Roofing — Invoice</title>
-  <link rel="stylesheet" href="invoice.css" />
+  <link rel="stylesheet" href="styles.css" />
   <script defer src="https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js"></script>
-  <script defer src="invoice.patched.js"></script>
+  <script defer src="invoice.js"></script>
 </head>
 <body>
   <!-- Toolbar (hidden in print/PDF) -->
@@ -35,30 +35,25 @@
         <div class="brand-meta">
           <input class="company-name" type="text" value="Endura Roofing" data-bind="company_name" />
           <div class="contact-list">
-            <input type="text" value="230 Spencer Ave" data-bind="company_addr1" placeholder="Address line 1" />
-            <input type="text" value="Thornton" data-bind="company_addr2" placeholder="City / Province" />
-            <input type="text" value="705-903-7663" data-bind="company_phone" placeholder="Phone" />
-            <input type="text" value="info@enduraroofing.ca" data-bind="company_email" placeholder="Email" />
-            <input type="text" value="enduraroofing.ca" data-bind="company_web" placeholder="Website" />
-            <input type="text" value="74055 2823 RT0001" data-bind="company_hst" placeholder="HST No." />
+            <input type="text" value="230 Spencer Ave" data-bind="company_addr1" />
+            <input type="text" value="Thornton" data-bind="company_addr2" />
+            <input type="text" value="705-903-7663" data-bind="company_phone" />
+            <input type="text" value="info@enduraroofing.ca" data-bind="company_email" />
+            <input type="text" value="enduraroofing.ca" data-bind="company_web" />
+            <input type="text" value="HST # 74055 2823 RT0001" data-bind="company_hst" />
           </div>
         </div>
       </div>
 
-      <div class="meta-and-status">
-        <div class="meta-grid">
-          <label>Invoice #<input type="text" placeholder="INV‑2025‑001" data-bind="invoice_no" /></label>
-          <label>Date<input type="date" data-bind="invoice_date" /></label>
-          <label>Due<input type="date" data-bind="invoice_due" /></label>
-          <label>PO / Reference<input type="text" placeholder="Optional" data-bind="po_no" /></label>
-        </div>
-        <div class="status-wrap">
-          <span id="status-badge" class="status-badge">DUE</span>
-        </div>
+      <div class="meta-grid">
+        <label>Invoice #<input type="text" placeholder="INV‑2025‑001" data-bind="invoice_no" /></label>
+        <label>Date<input type="date" data-bind="invoice_date" /></label>
+        <label>Due<input type="date" data-bind="invoice_due" /></label>
+        <label>P.O. #<input type="text" placeholder="(optional)" data-bind="po_no" /></label>
       </div>
     </header>
 
-    <!-- Parties / Project -->
+    <!-- Parties / Service -->
     <section class="grid-2 avoid-break">
       <div class="card">
         <h3>Bill To</h3>
@@ -71,11 +66,11 @@
         </div>
       </div>
       <div class="card">
-        <h3>Project</h3>
+        <h3>Service Location</h3>
         <div class="stack-10">
-          <input type="text" placeholder="Project Name" data-bind="project_name" />
-          <input type="text" placeholder="Project Location" data-bind="project_location" />
-          <textarea rows="3" placeholder="Project notes (optional)…" data-bind="project_overview">• For card payments, call 705‑903‑7663.</textarea>
+          <input type="text" placeholder="Site Address" data-bind="service_addr" />
+          <input type="text" placeholder="Project / Job Name" data-bind="project_name" />
+          <textarea rows="3" placeholder="Brief description of work performed…" data-bind="work_summary"></textarea>
         </div>
       </div>
     </section>
@@ -113,6 +108,7 @@
     <!-- Totals -->
     <section class="card totals avoid-break">
       <h3>Summary</h3>
+      <!-- Shared 3-column grid: label | spacer | fixed-width value (14ch) -->
       <div class="totals-grid" id="totals-grid">
         <div class="row" id="subtotal-row">
           <div class="label">Subtotal</div>
@@ -150,7 +146,7 @@
         </div>
 
         <div class="row" id="tax-row">
-          <div class="label">HST</div>
+          <div class="label">Tax</div>
           <div class="spacer"></div>
           <div class="value">
             <span class="curr">$</span><span class="amt" id="tax-amount">0.00</span>
@@ -166,7 +162,7 @@
           </div>
         </div>
 
-        <div class="row total" id="grand-row">
+        <div class="row" id="grand-row">
           <div class="label">Total</div>
           <div class="spacer"></div>
           <div class="value">
@@ -175,37 +171,44 @@
         </div>
 
         <div class="row" id="paid-row">
-          <div class="label">Paid to Date</div>
+          <div class="label">Amount Paid</div>
           <div class="spacer"></div>
           <div class="value">
             <span class="curr">$</span>
-            <span class="amt amt-input"><input id="paid" type="text" inputmode="decimal" placeholder="0.00" /></span>
+            <span class="amt amt-input"><input id="amount-paid" type="text" inputmode="decimal" placeholder="0.00" /></span>
           </div>
         </div>
 
-        <div class="row due" id="due-row">
-          <div class="label">Amount Due</div>
+        <div class="row total" id="balance-row">
+          <div class="label">Balance Due</div>
           <div class="spacer"></div>
           <div class="value">
-            <span class="curr">$</span><span class="amt" id="amount-due">0.00</span>
+            <span class="curr">$</span><span class="amt" id="balance-due">0.00</span>
           </div>
         </div>
       </div>
     </section>
 
-    <!-- Payment instructions -->
+    <!-- Payment & Terms -->
     <section class="card avoid-break">
-      <h3>Payment Instructions</h3>
-      <textarea rows="6" data-bind="payment_instructions">• Cheques payable to Endura Roofing.
-• E-transfers to sales@enduraroofing.ca.
-• HST No.: 74055 2823 RT0001
-• Thank you for your business!</textarea>
+      <h3>Payment & Terms</h3>
+      <textarea rows="10" data-bind="terms">• Cheques are payable to Endura Roofing.
+• e‑Transfers to sales@enduraroofing.ca (include the invoice # in the message).
+PAYMENT
+• E‑transfer to info@enduraroofing.ca (include the invoice # in the memo).
+• Cheque payable to Endura Roofing.
+
+TERMS & NOTES
+• Payment due upon receipt unless otherwise noted.
+• HST (13%) applies unless exempt. HST # 74055 2823 RT0001.
+• Late balances accrue interest at 2% per month (24% per annum) or the maximum permitted by law.
+• Materials remain the property of Endura Roofing until paid in full.</textarea>
     </section>
 
     <!-- Notes -->
     <section class="card avoid-break">
       <h3>Notes</h3>
-      <textarea rows="5" data-bind="notes" placeholder="Add any invoice‑specific notes, change order references, etc."></textarea>
+      <textarea rows="5" data-bind="notes" placeholder="Add any job-specific notes or references here."></textarea>
     </section>
   </main>
 
