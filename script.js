@@ -1,5 +1,5 @@
 /* ===========================================================
-   Endura Roofing — Quote
+   Endura Metal Roofing Ltd. — Quote
    script.js  (Manual PDF export + smart page breaks + auto libs)
    - Auto-loads html2canvas & jsPDF if missing
    - Off-screen sandbox (not clipped), waits for fonts & images
@@ -209,7 +209,7 @@ function buildPrintClone() {
 
   // Build a tidy letterhead for the PDF (uses live values)
   const getVal = (k) => (document.querySelector(`[data-bind="${k}"]`)?.value || '').trim();
-  const name   = getVal('company_name') || 'Endura Roofing';
+  const name   = getVal('company_name') || 'Endura Metal Roofing Ltd.';
   const addr1  = getVal('company_addr1');
   const addr2  = getVal('company_addr2');
   const phone  = getVal('company_phone');
